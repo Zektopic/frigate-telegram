@@ -56,6 +56,9 @@ docker compose up -d
 | `REST_API_LISTEN_ADDR` | `:8080` | Rest API listen addr |
 | `SHORT_EVENT_MESSAGE_FORMAT` | `False` | Short event message format |
 | `INCLUDE_THUMBNAIL_EVENT` | `True` | Include thumbnail from event to messsage |
+| `HTTP_PROXY` | `""` | HTTP proxy for outgoing connections (example: `http://xray:1080`) |
+| `HTTPS_PROXY` | `""` | HTTP proxy for outgoing connections (example: `socks5://byedpi:1080`) |
+| `NO_PROXY` | `""` | Comma-separated list of hosts/domains to bypass proxy (e.g., `frigate,redis,localhost,127.0.0.1,192.168.0.0/16`)|
 
 
 ## Features

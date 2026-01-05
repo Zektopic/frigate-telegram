@@ -20,7 +20,7 @@ services:
     image: ghcr.io/oldtyt/frigate-telegram:amd64
     restart: always
     networks: [net]
-    ports: 
+    ports:
       - 8080:8080
     environment:
       TELEGRAM_BOT_TOKEN: 1234567890:ABCDEFGHEFGREHBTYJBTRGBER34T54Y54
