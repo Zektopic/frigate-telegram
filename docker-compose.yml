@@ -1,5 +1,4 @@
 ---
-version: '3'
 networks:
   net:
 
@@ -10,6 +9,7 @@ services:
     restart: always
     command:
       - 'redis-server'
+      - '--requirepass ${REDIS_PASSWORD}'
       - '--save 900 1'
       - '--save 300 10'
       - '--save 60 100'
@@ -17,24 +17,31 @@ services:
       - /mnt/docker/redis/data:/data
 
   frigate-telegram:
-    image: ghcr.io/oldtyt/frigate-telegram:amd64
+    build:
+      context: .
+      dockerfile: docker/amd64/Dockerfile
     restart: always
     networks: [net]
     ports: 
-      - 8080:8080
+      - 3232:3232
     environment:
-      TELEGRAM_BOT_TOKEN: 1234567890:ABCDEFGHEFGREHBTYJBTRGBER34T54Y54
-      FRIGATE_URL: http://192.168.0.254:5000
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      FRIGATE_URL: ${FRIGATE_URL}
       FRIGATE_EVENT_LIMIT: 5
       DEBUG: False
-      TELEGRAM_CHAT_ID: "0"
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       SLEEP_TIME: 30
-      FRIGATE_EXTERNAL_URL: https://frigate.domain.com
-      TZ: Europe/Berlin
+      FRIGATE_EXTERNAL_URL: ${FRIGATE_EXTERNAL_URL}
+      TZ: ${TZ}
       REDIS_ADDR: "redis:6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       REST_API_ENABLE: False
+      REST_API_LISTEN_ADDR: ${REST_API_LISTEN_ADDR}
+      TIME_WAIT_SAVE: ${TIME_WAIT_SAVE}
+      INCLUDE_CLIP_EVENT: ${INCLUDE_CLIP_EVENT}
+      INCLUDE_PREVIEW_EVENT: ${INCLUDE_PREVIEW_EVENT}
     volumes:
       - type: tmpfs # Optional
         target: /tmp
         tmpfs:
-          size: 10000000
+          size: 500000000

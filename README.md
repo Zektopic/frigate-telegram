@@ -56,6 +56,8 @@ docker compose up -d
 | `REST_API_LISTEN_ADDR` | `:8080` | Rest API listen addr |
 | `SHORT_EVENT_MESSAGE_FORMAT` | `False` | Short event message format |
 | `INCLUDE_THUMBNAIL_EVENT` | `True` | Include thumbnail from event to messsage |
+| `INCLUDE_CLIP_EVENT` | `True` | Include clip from event to messsage |
+| `INCLUDE_PREVIEW_EVENT` | `True` | Include preview (video snippet) from event to messsage |
 
 
 ## Features

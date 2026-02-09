@@ -120,7 +120,7 @@ func ErrorSend(TextError string, bot *tgbotapi.BotAPI, EventID string) {
 	if err != nil {
 		log.Error.Println(err.Error())
 	}
-	log.Error.Fatalln(TextError)
+	log.Error.Println(TextError)
 }
 
 func WarnSend(TextError string, bot *tgbotapi.BotAPI, EventID string) {
@@ -387,6 +387,58 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 	return filename
 }
 
+func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
+	// Get config
+	conf := config.New()
+
+	// Generate preview URL
+	PreviewURL := conf.FrigateURL + "/api/events/" + EventID + "/preview.mp4"
+	log.Debug.Println("Downloading preview from URL: " + PreviewURL)
+
+	// Generate uniq filename
+	filename := "/tmp/" + EventID + "_preview.mp4"
+
+	// Download preview file
+	resp, err := http.Get(PreviewURL)
+	if err != nil {
+		ErrorSend("Error preview download: "+err.Error(), bot, EventID)
+	}
+	defer resp.Body.Close()
+
+	// Check server response
+	if resp.StatusCode != http.StatusOK {
+		// Preview might not be available in older Frigate versions or if not generated yet
+		log.Debug.Printf("Preview not available (status %d), skipping", resp.StatusCode)
+		return ""
+	}
+
+	// Read content length if available
+	contentLength := resp.ContentLength
+	if contentLength == 0 {
+		log.Debug.Println("Received empty preview from server (content length is 0)")
+		return ""
+	}
+
+	// Create preview file
+	f, err := os.Create(filename)
+	if err != nil {
+		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
+	}
+	defer f.Close()
+
+	// Writer the body to file
+	bytesWritten, err := io.Copy(f, resp.Body)
+	if err != nil {
+		ErrorSend("Error preview write: "+err.Error(), bot, EventID)
+	}
+
+	if bytesWritten == 0 {
+		return ""
+	}
+
+	return filename
+}
+
 func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 	// Get config
 	conf := config.New()
@@ -478,7 +530,11 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 	var FilePathClip string
 	var hasClip bool
 
-	if FrigateEvent.HasClip && FrigateEvent.EndTime != 0 {
+	if conf.IncludeClipEvent && FrigateEvent.HasClip && FrigateEvent.EndTime != 0 {
+		// Wait for fully video event created
+		log.Debug.Printf("Waiting %d seconds for clip to be ready", conf.TimeWaitSave)
+		time.Sleep(time.Duration(conf.TimeWaitSave) * time.Second)
+
 		// Save clip
 		FilePathClip = SaveClip(FrigateEvent.ID, bot)
 		hasClip = true
@@ -503,11 +559,38 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 
 				if !conf.IncludeThumbnailEvent {
 					MediaClip.Caption = text
+					MediaClip.ParseMode = tgbotapi.ModeMarkdown
 				}
 
 				medias = append(medias, MediaClip)
 			} else {
 				log.Debug.Printf("Clip file size is too large: %d bytes (limit: 52428800)", videoInfo.Size())
+			}
+		}
+	}
+
+	// Handle Preview (Video Snippet)
+	var FilePathPreview string
+	var hasPreview bool
+
+	if conf.IncludePreviewEvent {
+		FilePathPreview = SavePreview(FrigateEvent.ID, bot)
+		if FilePathPreview != "" {
+			hasPreview = true
+			previewInfo, err := os.Stat(FilePathPreview)
+			if err == nil && previewInfo.Size() > 0 && previewInfo.Size() < 52428800 {
+				log.Debug.Printf("Adding preview to media group: %s (size: %d bytes)", FilePathPreview, previewInfo.Size())
+				MediaPreview := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(FilePathPreview))
+				if len(medias) == 0 {
+					MediaPreview.Caption = text
+					MediaPreview.ParseMode = tgbotapi.ModeMarkdown
+				}
+				medias = append(medias, MediaPreview)
+			} else {
+				hasPreview = false
+				if err != nil {
+					log.Debug.Printf("Error stating preview file: %s", err.Error())
+				}
 			}
 		}
 	}
@@ -560,13 +643,17 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 		msg := tgbotapi.NewMessage(conf.TelegramChatID, "")
 		msg.Text = text
 		if _, err := bot.Send(msg); err != nil {
-			log.Error.Fatalln("Error sending message: " + err.Error())
+			log.Error.Println("Error sending message: " + err.Error())
 		}
 	}
 
 	// Now we can safely remove the files after the media group is sent
 	if hasClip {
 		os.Remove(FilePathClip)
+	}
+
+	if hasPreview {
+		os.Remove(FilePathPreview)
 	}
 
 	if conf.IncludeThumbnailEvent {

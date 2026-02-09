@@ -12,8 +12,11 @@ type Config struct {
 	RestAPIEnable           bool
 	ShortEventMessageFormat bool
 	IncludeThumbnailEvent   bool
+	IncludeClipEvent        bool
+	IncludePreviewEvent     bool
 	FrigateEventLimit       int
 	SleepTime               int
+	TimeWaitSave            int
 	RedisDB                 int
 	RedisProtocol           int
 	RedisTTL                int
@@ -43,6 +46,7 @@ func New() *Config {
 		Debug:                   getEnvAsBool("DEBUG", false),
 		TelegramChatID:          getEnvAsInt64("TELEGRAM_CHAT_ID", 0),
 		SleepTime:               getEnvAsInt("SLEEP_TIME", 5),
+		TimeWaitSave:            getEnvAsInt("TIME_WAIT_SAVE", 30),
 		WatchDogSleepTime:       getEnvAsInt("WATCH_DOG_SLEEP_TIME", 3),
 		FrigateExternalURL:      getEnv("FRIGATE_EXTERNAL_URL", "http://localhost:5000"),
 		RedisAddr:               getEnv("REDIS_ADDR", "localhost:6379"),
@@ -61,6 +65,8 @@ func New() *Config {
 		RestAPIEnable:           getEnvAsBool("REST_API_ENABLE", false),
 		ShortEventMessageFormat: getEnvAsBool("SHORT_EVENT_MESSAGE_FORMAT", false),
 		IncludeThumbnailEvent:   getEnvAsBool("INCLUDE_THUMBNAIL_EVENT", true),
+		IncludeClipEvent:        getEnvAsBool("INCLUDE_CLIP_EVENT", true),
+		IncludePreviewEvent:     getEnvAsBool("INCLUDE_PREVIEW_EVENT", true),
 		RestAPIListenAddr:       getEnv("REST_API_LISTEN_ADDR", ":8080"),
 	}
 }
