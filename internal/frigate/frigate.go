@@ -139,17 +139,20 @@ func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) strin
 	// Verify that we have a non-empty thumbnail string
 	if Thumbnail == "" {
 		ErrorSend("Empty thumbnail string received", bot, EventID)
+		return ""
 	}
 
 	// Decode string Thumbnail base64
 	dec, err := base64.StdEncoding.DecodeString(Thumbnail)
 	if err != nil {
 		ErrorSend("Error when base64 string decode: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	// Check if we got any data after decoding
 	if len(dec) == 0 {
 		ErrorSend("Decoded thumbnail is empty", bot, EventID)
+		return ""
 	}
 
 	log.Debug.Printf("Decoded thumbnail size: %d bytes", len(dec))
@@ -159,6 +162,7 @@ func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) strin
 	f, err := os.Create(filename)
 	if err != nil {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
+		return ""
 	}
 	defer f.Close()
 
@@ -166,11 +170,13 @@ func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) strin
 	bytesWritten, err := f.Write(dec)
 	if err != nil {
 		ErrorSend("Error when write file: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	// Check if we wrote anything
 	if bytesWritten == 0 {
 		ErrorSend("No data written to thumbnail file", bot, EventID)
+		return ""
 	}
 
 	log.Debug.Printf("Written %d bytes to %s", bytesWritten, filename)
@@ -179,16 +185,19 @@ func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) strin
 	err = f.Sync()
 	if err != nil {
 		ErrorSend("Error when sync file: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	// Verify file exists and has content
 	fileInfo, err := os.Stat(filename)
 	if err != nil {
 		ErrorSend("Error verifying thumbnail file: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	if fileInfo.Size() == 0 {
 		ErrorSend("Thumbnail file is empty after write", bot, EventID)
+		return ""
 	}
 
 	log.Debug.Printf("Successfully saved thumbnail to %s (size: %d bytes)", filename, fileInfo.Size())
@@ -210,54 +219,57 @@ func DownloadThumbnail(EventID string, bot *tgbotapi.BotAPI) string {
 	resp, err := http.Get(ThumbnailURL)
 	if err != nil {
 		ErrorSend("Error thumbnail download: "+err.Error(), bot, EventID)
+		return ""
 	}
 	defer resp.Body.Close()
 
 	// Check server response
 	if resp.StatusCode != http.StatusOK {
 		ErrorSend("Return bad status: "+resp.Status, bot, EventID)
+		return ""
 	}
 
-	// Read content length if available
-	contentLength := resp.ContentLength
-	if contentLength == 0 {
-		ErrorSend("Received empty thumbnail from server (content length is 0)", bot, EventID)
-	}
-	log.Debug.Printf("Expected thumbnail content length: %d bytes", contentLength)
+	log.Debug.Printf("Expected thumbnail content length: %d bytes", resp.ContentLength)
 
 	// Create thumbnail file
 	f, err := os.Create(filename)
 	if err != nil {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
+		return ""
 	}
-	defer f.Close() // Ensure file is closed even if there's an error
+	defer f.Close()
 
 	// Write the body to file
 	bytesWritten, err := io.Copy(f, resp.Body)
 	if err != nil {
 		ErrorSend("Error thumbnail write: "+err.Error(), bot, EventID)
+		return ""
 	}
 	log.Debug.Printf("Written %d bytes to %s", bytesWritten, filename)
 
 	// Check if we wrote anything
 	if bytesWritten == 0 {
 		ErrorSend("No data written to thumbnail file", bot, EventID)
+		return ""
 	}
 
 	// Ensure file is properly synced to disk
 	err = f.Sync()
 	if err != nil {
 		ErrorSend("Error syncing file to disk: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	// Verify file exists and has content
 	fileInfo, err := os.Stat(filename)
 	if err != nil {
 		ErrorSend("Error verifying thumbnail file: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	if fileInfo.Size() == 0 {
 		ErrorSend("Thumbnail file is empty after download", bot, EventID)
+		return ""
 	}
 
 	log.Debug.Printf("Successfully downloaded thumbnail to %s (size: %d bytes)", filename, fileInfo.Size())
@@ -325,62 +337,63 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 	resp, err := http.Get(ClipURL)
 	if err != nil {
 		ErrorSend("Error clip download: "+err.Error(), bot, EventID)
+		return ""
 	}
 	defer resp.Body.Close()
 
 	// Check server response
 	if resp.StatusCode != http.StatusOK {
 		ErrorSend("Return bad status: "+resp.Status, bot, EventID)
-	}
-
-	// Read content length if available
-	contentLength := resp.ContentLength
-	if contentLength == 0 {
-		WarnSend("Received empty clip from server (content length is 0)", bot, EventID)
 		return ""
 	}
-	log.Debug.Printf("Expected content length: %d bytes", contentLength)
+
+	log.Debug.Printf("Expected content length: %d bytes", resp.ContentLength)
 
 	// Create clip file
 	f, err := os.Create(filename)
 	if err != nil {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
+		return ""
 	}
-	defer f.Close() // Ensure file is closed even if there's an error
 
-	// Writer the body to file
+	// Write the body to file
 	bytesWritten, err := io.Copy(f, resp.Body)
 	if err != nil {
+		f.Close()
 		ErrorSend("Error clip write: "+err.Error(), bot, EventID)
+		return ""
 	}
 	log.Debug.Printf("Written %d bytes to %s", bytesWritten, filename)
 
 	// Check if we wrote anything
 	if bytesWritten == 0 {
+		f.Close()
 		WarnSend("No data written to clip file", bot, EventID)
 		return ""
 	}
 
 	// Ensure file is properly synced to disk
-	err = f.Sync()
-	if err != nil {
+	if err = f.Sync(); err != nil {
+		f.Close()
 		ErrorSend("Error syncing file to disk: "+err.Error(), bot, EventID)
+		return ""
 	}
 
-	// Close the file
-	err = f.Close()
-	if err != nil {
+	if err = f.Close(); err != nil {
 		ErrorSend("Error closing clip file: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	// Verify file exists and has content
 	fileInfo, err := os.Stat(filename)
 	if err != nil {
 		ErrorSend("Error verifying clip file: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	if fileInfo.Size() == 0 {
 		ErrorSend("Clip file is empty after download", bot, EventID)
+		return ""
 	}
 
 	log.Debug.Printf("Successfully downloaded clip to %s (size: %d bytes)", filename, fileInfo.Size())
@@ -426,13 +439,19 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 	}
 	defer f.Close()
 
-	// Writer the body to file
+	// Write the body to file
 	bytesWritten, err := io.Copy(f, resp.Body)
 	if err != nil {
 		ErrorSend("Error preview write: "+err.Error(), bot, EventID)
+		return ""
 	}
 
 	if bytesWritten == 0 {
+		return ""
+	}
+
+	if err = f.Sync(); err != nil {
+		ErrorSend("Error syncing preview file to disk: "+err.Error(), bot, EventID)
 		return ""
 	}
 
@@ -512,18 +531,19 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 		thumbnailInfo, err := os.Stat(FilePathThumbnail)
 		if err != nil {
 			ErrorSend("Error getting thumbnail file info: "+err.Error(), bot, FrigateEvent.ID)
-		}
-
-		if thumbnailInfo.Size() == 0 {
+			FilePathThumbnail = ""
+		} else if thumbnailInfo.Size() == 0 {
 			log.Error.Printf("Thumbnail file is empty: %s", FilePathThumbnail)
 			ErrorSend("Cannot send empty thumbnail file", bot, FrigateEvent.ID)
+			FilePathThumbnail = ""
 		}
 
-		MediaThumbnail := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(FilePathThumbnail))
-		MediaThumbnail.Caption = text
-		MediaThumbnail.ParseMode = tgbotapi.ModeMarkdown
-
-		medias = append(medias, MediaThumbnail)
+		if FilePathThumbnail != "" {
+			MediaThumbnail := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(FilePathThumbnail))
+			MediaThumbnail.Caption = text
+			MediaThumbnail.ParseMode = tgbotapi.ModeMarkdown
+			medias = append(medias, MediaThumbnail)
+		}
 	}
 
 	// Define FilePathClip outside the if block to make it available later
@@ -545,26 +565,27 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 			videoInfo, err := os.Stat(FilePathClip)
 			if err != nil {
 				ErrorSend("Error receiving information about the clip file: "+err.Error(), bot, FrigateEvent.ID)
-			}
-
-			// Double check file size
-			if videoInfo.Size() == 0 {
+				hasClip = false
+			} else if videoInfo.Size() == 0 {
 				log.Error.Printf("Clip file is empty: %s", FilePathClip)
 				hasClip = false
-			} else if videoInfo.Size() < 52428800 {
-				// Telegram don't send large file see for more: https://github.com/OldTyT/frigate-telegram/issues/5
-				// Add clip to media group
-				log.Debug.Printf("Adding clip to media group: %s (size: %d bytes)", FilePathClip, videoInfo.Size())
-				MediaClip := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(FilePathClip))
+			}
+			if hasClip {
+				if videoInfo.Size() < 52428800 {
+					// Telegram don't send large file see for more: https://github.com/OldTyT/frigate-telegram/issues/5
+					// Add clip to media group
+					log.Debug.Printf("Adding clip to media group: %s (size: %d bytes)", FilePathClip, videoInfo.Size())
+					MediaClip := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(FilePathClip))
 
-				if !conf.IncludeThumbnailEvent {
-					MediaClip.Caption = text
-					MediaClip.ParseMode = tgbotapi.ModeMarkdown
+					if !conf.IncludeThumbnailEvent {
+						MediaClip.Caption = text
+						MediaClip.ParseMode = tgbotapi.ModeMarkdown
+					}
+
+					medias = append(medias, MediaClip)
+				} else {
+					log.Debug.Printf("Clip file size is too large: %d bytes (limit: 52428800)", videoInfo.Size())
 				}
-
-				medias = append(medias, MediaClip)
-			} else {
-				log.Debug.Printf("Clip file size is too large: %d bytes (limit: 52428800)", videoInfo.Size())
 			}
 		}
 	}
