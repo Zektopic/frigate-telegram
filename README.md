@@ -100,3 +100,7 @@ Commands:
 
 > [!WARNING]
 > For security reasons, commands only work in the TelegramChatID chat.
+
+
+Now Works on Video clips as well 
+
