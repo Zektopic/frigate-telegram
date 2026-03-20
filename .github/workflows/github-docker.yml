@@ -13,13 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: ghcr.io
-      IMAGE_NAME: oldtyt/frigate-telegram
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Variables
         id: vars
-        run: echo "::set-output name=SHORT_COMMIT_ID::$(git rev-parse --short HEAD)"
+        run: |
+          echo "SHORT_COMMIT_ID=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Build image
         id: docker-build
         run: >-
@@ -30,7 +31,7 @@ jobs:
           -t $REPOSITORY_URL/$IMAGE_NAME:latest
           -f docker/amd64/Dockerfile .
       - name: Docker Login
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REPOSITORY_URL }}
           username: ${{ github.actor }}
@@ -43,17 +44,18 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: ghcr.io
-      IMAGE_NAME: oldtyt/frigate-telegram
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Variables
         id: vars
-        run: echo "::set-output name=SHORT_COMMIT_ID::$(git rev-parse --short HEAD)"
+        run: |
+          echo "SHORT_COMMIT_ID=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Set arm32v6 platform
         run: docker buildx create --platform linux/arm/v6 --name arm --use
       - name: Docker Login
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REPOSITORY_URL }}
           username: ${{ github.actor }}
@@ -71,17 +73,18 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: ghcr.io
-      IMAGE_NAME: oldtyt/frigate-telegram
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Variables
         id: vars
-        run: echo "::set-output name=SHORT_COMMIT_ID::$(git rev-parse --short HEAD)"
+        run: |
+          echo "SHORT_COMMIT_ID=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Set arm32v7 platform
         run: docker buildx create --platform linux/arm/v7 --name arm --use
       - name: Docker Login
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REPOSITORY_URL }}
           username: ${{ github.actor }}
@@ -99,17 +102,18 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REPOSITORY_URL: ghcr.io
-      IMAGE_NAME: oldtyt/frigate-telegram
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Variables
         id: vars
-        run: echo "::set-output name=SHORT_COMMIT_ID::$(git rev-parse --short HEAD)"
+        run: |
+          echo "SHORT_COMMIT_ID=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Set arm64v8 platform
         run: docker buildx create --platform linux/arm64/v8 --name arm --use
       - name: Docker Login
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REPOSITORY_URL }}
           username: ${{ github.actor }}
