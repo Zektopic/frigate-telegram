@@ -1,4 +1,4 @@
-FROM arm64v8/golang:1.24-alpine AS builder
+FROM arm64v8/golang:1.25-alpine AS builder
 
 WORKDIR $GOPATH/frigate-telegram
 COPY . $GOPATH/frigate-telegram
