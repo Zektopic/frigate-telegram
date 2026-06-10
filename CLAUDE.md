@@ -85,7 +85,7 @@ docker compose -f docker-compose.dev.yml up -d
 
 1. **`config.New()` creates a new struct every call** — it re-reads all env vars. This is intentional for runtime config changes but means it's called frequently throughout the codebase (even inside loops). Don't cache it globally without understanding this trade-off.
 
-2. **`ErrorSend` / `WarnSend` do not halt execution** — they log + send a Telegram message but return normally. Every caller MUST handle its own early return after an error; the functions won't stop the control flow.
+2. **`ErrorSend` / `WarnSend` do not halt execution** — they log + send a Telegram message but return normally. Every caller MUST handle its own early return after an error; the functions won't stop the control flow. **Note:** Both functions are throttled — Telegram messages are rate-limited to 1 per 15 minutes per level to avoid chat flooding. Errors are always logged locally regardless of throttle state.
 
 3. **The `GetStateSendEvent` / `SetStateSendEvent` naming is inverted**: `SetStateSendEvent(true)` means **stop** sending. `GetStateSendEvent()` returns `true` when the stop key is **not** set (i.e., sending is active). This double inversion works but is confusing — see the Redis key name `FrigateTelegramStopSendEventMessage` for the original intent.
 
@@ -94,6 +94,29 @@ docker compose -f docker-compose.dev.yml up -d
 5. **Telegram media group limit** — clips > 50 MB are skipped (Telegram limit).
 
 6. **Event dedup** — events are tracked in Redis by their Frigate event ID. An event in `InProgress` state will be re-sent (Frigate may update it). An event in `Finished` state is skipped. `InWork` means a goroutine is currently processing it.
+
+7. **Redis circuit breaker** — after 5 consecutive Redis failures, the circuit opens and event processing pauses until Redis recovers. This prevents event spam storms when Redis is down. Check `IsRedisHealthy()` before processing.
+
+8. **Config validation** — `Config.Validate()` runs at startup and exits with clear errors if required fields (bot token, chat ID, Frigate URL) are missing. This prevents cryptic runtime panics.
+
+9. **Concurrency limit** — event processing is bounded by a semaphore (max 5 concurrent). Prevents resource exhaustion during event floods.
+
+10. **Graceful shutdown** — SIGINT/SIGTERM triggers context cancellation, cleanly stopping the main loop and NotifyEvents watchdog. A shutdown message is sent to Telegram.
+
+## Security
+
+- **REST API authentication**: Set `REST_API_KEY` to require `X-API-Key` header on control endpoints (/stop, /resume, /mute, /unmute, /status). /ping is always unauthenticated for healthchecks.
+- **HTTP timeouts**: REST API has Read/Write/Idle timeouts (10s/10s/60s).
+- **Host networking**: Both Redis and frigate-telegram use host networking in production to match Frigate's network mode. This means ports are bound directly on the host.
+
+## Production Deployment
+
+The production instance runs at `/home/manu/frigate-telegram` with:
+- Docker Compose with host networking
+- `.env` file with secrets (gitignored)
+- Redis data persisted at `/mnt/docker/redis/data`
+- REST API on port 3232 with authentication
+- Log rotation: max 10MB per file, max 3 files
 
 ## Upstream
 
