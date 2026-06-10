@@ -1,5 +1,5 @@
-[![Go Report Card](https://goreportcard.com/badge/github.com/OldTyT/frigate-telegram)](https://goreportcard.com/report/OldTyT/frigate-telegram)
-[![GolangCI](https://golangci.com/badges/github.com/OldTyT/frigate-telegram.svg)](https://golangci.com/r/github.com/OldTyT/frigate-telegram)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Zektopic/frigate-telegram)](https://goreportcard.com/report/Zektopic/frigate-telegram)
+[![GolangCI](https://github.com/Zektopic/frigate-telegram/actions/workflows/golang.yml/badge.svg)](https://github.com/Zektopic/frigate-telegram/actions/workflows/golang.yml)
 
 # Frigate telegram
 
@@ -9,14 +9,14 @@ Frigate telegram event notifications.
 
 ## Example of work
 
-![alt text](https://raw.githubusercontent.com/OldTyT/frigate-telegram/main/resources/img/telegram_msg.png)
+![alt text](https://raw.githubusercontent.com/Zektopic/frigate-telegram/main/resources/img/telegram_msg.png)
 
 ## How to start
 
 1. Install docker
 2. Download `docker-compose.yml` file:
 ```bash
-https://raw.githubusercontent.com/OldTyT/frigate-telegram/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Zektopic/frigate-telegram/main/docker-compose.yml
 ```
 3. Change environment variables in docker-compose
 4. Deploy:
@@ -77,7 +77,7 @@ Possible Commands:
 - /stop
 - /unmute
 
-For more details Swagger aviaible on: `http://localhost:8080/docs/index.html`
+For more details Swagger available on: `http://localhost:8080/docs/index.html`
 
 ### Mute/unmute events messages
 
@@ -102,5 +102,7 @@ Commands:
 > For security reasons, commands only work in the TelegramChatID chat.
 
 
-Now Works on Video clips as well 
+## Upstream
+
+This project is a fork of [OldTyT/frigate-telegram](https://github.com/OldTyT/frigate-telegram).
 
