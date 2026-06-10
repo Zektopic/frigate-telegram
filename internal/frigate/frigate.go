@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oldtyt/frigate-telegram/internal/config"
@@ -82,6 +83,38 @@ var httpClient = &http.Client{
 	Timeout: 60 * time.Second,
 }
 
+// errorThrottle tracks the last time each error type was sent to Telegram
+// to avoid flooding the chat with repeated error messages.
+var (
+	lastErrorSend   time.Time
+	lastWarnSend    time.Time
+	errorThrottleMu sync.Mutex
+)
+
+const errorThrottleInterval = 15 * time.Minute
+
+// throttleErrorSend returns true if the error should be sent (enough time has passed).
+func throttleErrorSend() bool {
+	errorThrottleMu.Lock()
+	defer errorThrottleMu.Unlock()
+	if time.Since(lastErrorSend) < errorThrottleInterval {
+		return false
+	}
+	lastErrorSend = time.Now()
+	return true
+}
+
+// throttleWarnSend returns true if the warning should be sent (enough time has passed).
+func throttleWarnSend() bool {
+	errorThrottleMu.Lock()
+	defer errorThrottleMu.Unlock()
+	if time.Since(lastWarnSend) < errorThrottleInterval {
+		return false
+	}
+	lastWarnSend = time.Now()
+	return true
+}
+
 func NormalizeTagText(text string) string {
 	var alphabetCheck = regexp.MustCompile(`^[A-Za-z]+$`)
 	var NormalizedText []string
@@ -122,23 +155,29 @@ func GetTagList(subLabel interface{}) []string {
 }
 
 func ErrorSend(TextError string, bot *tgbotapi.BotAPI, EventID string) {
+	log.Error.Println(TextError + "\nEventID: " + EventID)
+	// Throttle Telegram error notifications to avoid flooding the chat
+	if !throttleErrorSend() {
+		return
+	}
 	conf := config.New()
-	TextError += "\nEventID: " + EventID
-	_, err := bot.Send(tgbotapi.NewMessage(conf.TelegramChatID, TextError))
+	_, err := bot.Send(tgbotapi.NewMessage(conf.TelegramChatID, TextError+"\nEventID: "+EventID))
 	if err != nil {
 		log.Error.Println(err.Error())
 	}
-	log.Error.Println(TextError)
 }
 
 func WarnSend(TextError string, bot *tgbotapi.BotAPI, EventID string) {
+	log.Warn.Println(TextError + "\nEventID: " + EventID)
+	// Throttle Telegram warning notifications to avoid flooding the chat
+	if !throttleWarnSend() {
+		return
+	}
 	conf := config.New()
-	TextError += "\nEventID: " + EventID
-	_, err := bot.Send(tgbotapi.NewMessage(conf.TelegramChatID, TextError))
+	_, err := bot.Send(tgbotapi.NewMessage(conf.TelegramChatID, TextError+"\nEventID: "+EventID))
 	if err != nil {
 		log.Error.Println(err.Error())
 	}
-	log.Warn.Println(TextError)
 }
 
 func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) string {

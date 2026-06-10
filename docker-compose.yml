@@ -1,12 +1,15 @@
 ---
-networks:
-  net:
-
 services:
   redis:
     image: redis:7.4-alpine
-    networks: [net]
+    network_mode: host
     restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     command:
       - 'redis-server'
       - '--requirepass ${REDIS_PASSWORD}'
@@ -21,27 +24,37 @@ services:
       context: .
       dockerfile: docker/amd64/Dockerfile
     restart: always
-    networks: [net]
-    ports: 
-      - 3232:3232
+    network_mode: host
+    depends_on:
+      redis:
+        condition: service_healthy
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      FRIGATE_URL: ${FRIGATE_URL}
+      FRIGATE_URL: ${FRIGATE_URL:-http://localhost:5000}
       FRIGATE_EVENT_LIMIT: 5
-      DEBUG: False
+      DEBUG: ${DEBUG:-false}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
-      SLEEP_TIME: 30
+      SLEEP_TIME: ${SLEEP_TIME:-30}
       FRIGATE_EXTERNAL_URL: ${FRIGATE_EXTERNAL_URL}
-      TZ: ${TZ}
-      REDIS_ADDR: "redis:6379"
+      TZ: ${TZ:-UTC}
+      REDIS_ADDR: "localhost:6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD}
-      REST_API_ENABLE: False
-      REST_API_LISTEN_ADDR: ${REST_API_LISTEN_ADDR}
-      TIME_WAIT_SAVE: ${TIME_WAIT_SAVE}
-      INCLUDE_CLIP_EVENT: ${INCLUDE_CLIP_EVENT}
-      INCLUDE_PREVIEW_EVENT: ${INCLUDE_PREVIEW_EVENT}
+      REST_API_ENABLE: ${REST_API_ENABLE:-false}
+      REST_API_LISTEN_ADDR: ":3232"
+      REST_API_KEY: ${REST_API_KEY:-}
+      SWAGGER_HOST: ${SWAGGER_HOST:-localhost:3232}
+      TIME_WAIT_SAVE: ${TIME_WAIT_SAVE:-30}
+      EVENT_BEFORE_SECONDS: ${EVENT_BEFORE_SECONDS:-300}
+      INCLUDE_THUMBNAIL_EVENT: ${INCLUDE_THUMBNAIL_EVENT:-true}
+      INCLUDE_CLIP_EVENT: ${INCLUDE_CLIP_EVENT:-true}
+      INCLUDE_PREVIEW_EVENT: ${INCLUDE_PREVIEW_EVENT:-true}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
-      - type: tmpfs # Optional
+      - type: tmpfs
         target: /tmp
         tmpfs:
           size: 500000000

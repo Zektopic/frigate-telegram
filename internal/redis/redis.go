@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/oldtyt/frigate-telegram/internal/config"
@@ -15,6 +16,43 @@ var (
 	ctx                    context.Context = context.Background()
 	conf                   *config.Config  = config.New()
 )
+
+// Circuit breaker for Redis — after consecutive failures, stop trusting Redis
+// to prevent event spam when Redis is unreachable.
+var (
+	consecutiveRedisFailures int
+	redisCircuitOpen         bool
+	redisCircuitMu           sync.Mutex
+)
+
+const maxRedisFailures = 5
+
+func recordRedisFailure() {
+	redisCircuitMu.Lock()
+	defer redisCircuitMu.Unlock()
+	consecutiveRedisFailures++
+	if consecutiveRedisFailures >= maxRedisFailures {
+		redisCircuitOpen = true
+		log.Error.Printf("Redis circuit breaker OPEN after %d consecutive failures", consecutiveRedisFailures)
+	}
+}
+
+func recordRedisSuccess() {
+	redisCircuitMu.Lock()
+	defer redisCircuitMu.Unlock()
+	if consecutiveRedisFailures > 0 {
+		log.Info.Printf("Redis circuit breaker RESET (was %d failures)", consecutiveRedisFailures)
+	}
+	consecutiveRedisFailures = 0
+	redisCircuitOpen = false
+}
+
+// IsRedisHealthy returns false if the circuit breaker is open (Redis is down).
+func IsRedisHealthy() bool {
+	redisCircuitMu.Lock()
+	defer redisCircuitMu.Unlock()
+	return !redisCircuitOpen
+}
 
 var rdb = redis.NewClient(&redis.Options{
 	Addr:     conf.RedisAddr,
@@ -31,15 +69,19 @@ func SetStateSendEvent(stop bool) bool {
 		err := rdb.Set(ctx, RedisKeyStateSendEvent, 1, 0).Err()
 		if err != nil {
 			log.Error.Println(err)
+			recordRedisFailure()
 			return false
 		}
+		recordRedisSuccess()
 		return true
 	} else {
 		err := rdb.Del(ctx, RedisKeyStateSendEvent).Err()
 		if err != nil {
 			log.Error.Println("SetStateSendEvent: Redis Del error: " + err.Error())
+			recordRedisFailure()
 			return false
 		}
+		recordRedisSuccess()
 		return true
 	}
 }
@@ -55,6 +97,7 @@ func GetStateSendEvent() bool {
 		return true
 	}
 	// Key exists — events are stopped
+	recordRedisSuccess()
 	return false
 }
 
@@ -66,21 +109,23 @@ func IsSendEnabled() bool {
 
 // Set state notify event msg in redis
 func SetStateMuteEvent(mute bool) bool {
-	// mute = true - send mute event
-	// mute = false - don't mute event msg
 	if mute {
 		err := rdb.Set(ctx, RedisKeyStateMuteEvent, 1, 0).Err()
 		if err != nil {
 			log.Error.Println(err)
+			recordRedisFailure()
 			return false
 		}
+		recordRedisSuccess()
 		return true
 	} else {
 		err := rdb.Del(ctx, RedisKeyStateMuteEvent).Err()
 		if err != nil {
 			log.Error.Println("SetStateMuteEvent: Redis Del error: " + err.Error())
+			recordRedisFailure()
 			return false
 		}
+		recordRedisSuccess()
 		return true
 	}
 }
@@ -94,6 +139,7 @@ func GetStateMuteEvent() bool {
 	if err != nil {
 		return false
 	}
+	recordRedisSuccess()
 	return true
 }
 
@@ -101,25 +147,30 @@ func AddNewEvent(EventID string, State string, RedisTTL time.Duration) {
 	err := rdb.Set(ctx, EventID, State, RedisTTL).Err()
 	if err != nil {
 		log.Error.Println(err)
+		recordRedisFailure()
+		return
 	}
+	recordRedisSuccess()
 }
 
 func CheckEvent(EventID string) bool {
 	event, err := rdb.Exists(ctx, EventID).Result()
 	if err != nil {
 		log.Error.Println("CheckEvent: Redis Exists error: " + err.Error())
-		// On Redis error, skip the event to avoid spamming duplicates
+		recordRedisFailure()
 		return false
 	}
 	if event == 0 {
+		recordRedisSuccess()
 		return true
 	}
 	val, err := rdb.Get(ctx, EventID).Result()
 	if err != nil {
 		log.Error.Println("CheckEvent: Redis Get error: " + err.Error())
-		// On Redis error, skip the event rather than making decisions on empty data
+		recordRedisFailure()
 		return false
 	}
+	recordRedisSuccess()
 	if val == "InProgress" {
 		return true
 	}
