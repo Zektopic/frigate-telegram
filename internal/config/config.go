@@ -126,3 +126,34 @@ func getEnvAsSlice(name string, defaultVal []string, sep string) []string {
 
 	return val
 }
+
+// Validate checks that required configuration values are set and returns
+// a slice of error messages for any missing or invalid values.
+func (c *Config) Validate() []string {
+	var errs []string
+
+	if c.TelegramBotToken == "" {
+		errs = append(errs, "TELEGRAM_BOT_TOKEN is required")
+	}
+	if c.TelegramChatID == 0 {
+		errs = append(errs, "TELEGRAM_CHAT_ID is required (must be non-zero)")
+	}
+	if c.FrigateURL == "" {
+		errs = append(errs, "FRIGATE_URL is required")
+	}
+	if c.FrigateExternalURL == "" {
+		errs = append(errs, "FRIGATE_EXTERNAL_URL is required")
+	}
+	if c.SleepTime < 1 {
+		errs = append(errs, "SLEEP_TIME must be at least 1 second")
+	}
+	if c.TimeWaitSave < 0 {
+		errs = append(errs, "TIME_WAIT_SAVE must be non-negative")
+	}
+	if c.RedisTTL < 1 {
+		errs = append(errs, "REDIS_TTL must be at least 1 second")
+	}
+	// Note: REST API without key is warned in main.go, not treated as fatal here
+
+	return errs
+}

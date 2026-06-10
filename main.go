@@ -23,6 +23,17 @@ func main() {
 	// Get config
 	conf := config.New()
 
+	// Validate configuration before starting
+	if errs := conf.Validate(); len(errs) > 0 {
+		for _, e := range errs {
+			log.Error.Println("Configuration error: " + e)
+		}
+		log.Error.Fatalln("Exiting due to configuration errors.")
+	}
+	if conf.RestAPIEnable && conf.RestAPIKey == "" {
+		log.Warn.Println("REST API enabled without REST_API_KEY — API will be unauthenticated!")
+	}
+
 	// Prepare startup msg
 	startupMsg := "Starting frigate-telegram. "
 	startupMsg += "Frigate URL: " + conf.FrigateURL
@@ -81,8 +92,12 @@ func main() {
 		}
 
 		if redis.GetStateSendEvent() {
-			events := frigate.GetEvents(FrigateEventsURL, bot, true)
-			frigate.ParseEvents(events, bot, false)
+			if redis.IsRedisHealthy() {
+				events := frigate.GetEvents(FrigateEventsURL, bot, true)
+				frigate.ParseEvents(events, bot, false)
+			} else {
+				log.Debug.Println("Redis circuit breaker open — skipping event processing")
+			}
 		} else {
 			log.Debug.Println("Skipping send events.")
 		}
