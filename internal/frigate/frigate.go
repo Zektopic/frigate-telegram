@@ -71,8 +71,13 @@ type EventStruct struct {
 	Zones              []any       `json:"zones"`
 }
 
-var Events EventsStruct
 var Event EventStruct
+
+// httpClient is a shared HTTP client with a reasonable timeout to prevent
+// goroutine leaks when the Frigate server is unreachable or hangs.
+var httpClient = &http.Client{
+	Timeout: 60 * time.Second,
+}
 
 func NormalizeTagText(text string) string {
 	var alphabetCheck = regexp.MustCompile(`^[A-Za-z]+$`)
@@ -216,7 +221,7 @@ func DownloadThumbnail(EventID string, bot *tgbotapi.BotAPI) string {
 	filename := "/tmp/" + EventID + ".jpg"
 
 	// Download thumbnail file
-	resp, err := http.Get(ThumbnailURL)
+	resp, err := httpClient.Get(ThumbnailURL)
 	if err != nil {
 		ErrorSend("Error thumbnail download: "+err.Error(), bot, EventID)
 		return ""
@@ -287,12 +292,13 @@ func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsSt
 		FrigateURL = FrigateURL + "&before=" + strconv.FormatInt(timestamp, 10)
 	}
 
-	log.Debug.Println("Geting events from Frigate via URL: " + FrigateURL)
+	log.Debug.Println("Getting events from Frigate via URL: " + FrigateURL)
 
 	// Request to Frigate
-	resp, err := http.Get(FrigateURL)
+	resp, err := httpClient.Get(FrigateURL)
 	if err != nil {
 		ErrorSend("Error get events from Frigate, error: "+err.Error(), bot, "ALL")
+		return EventsStruct{}
 	}
 	defer resp.Body.Close()
 
@@ -306,20 +312,22 @@ func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsSt
 	byteValue, err := io.ReadAll(resp.Body)
 	if err != nil {
 		ErrorSend("Can't read JSON: "+err.Error(), bot, "ALL")
+		return EventsStruct{}
 	}
 
-	// Parse data from JSON to struct
-	err1 := json.Unmarshal(byteValue, &Events)
-	if err1 != nil {
-		ErrorSend("Error unmarshal json: "+err1.Error(), bot, "ALL")
+	// Parse data from JSON to a local struct (not package-level to avoid data race)
+	var events EventsStruct
+	if err := json.Unmarshal(byteValue, &events); err != nil {
+		ErrorSend("Error unmarshal json: "+err.Error(), bot, "ALL")
 		if e, ok := err.(*json.SyntaxError); ok {
 			log.Info.Println("syntax error at byte offset " + strconv.Itoa(int(e.Offset)))
 		}
 		log.Info.Println("Exit.")
+		return EventsStruct{}
 	}
 
-	// Return Events
-	return Events
+	// Return events
+	return events
 }
 
 func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
@@ -330,11 +338,11 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 	ClipURL := conf.FrigateURL + "/api/events/" + EventID + "/clip.mp4"
 	log.Debug.Println("Downloading clip from URL: " + ClipURL)
 
-	// Generate uniq filename
+	// Generate unique filename
 	filename := "/tmp/" + EventID + ".mp4"
 
 	// Download clip file
-	resp, err := http.Get(ClipURL)
+	resp, err := httpClient.Get(ClipURL)
 	if err != nil {
 		ErrorSend("Error clip download: "+err.Error(), bot, EventID)
 		return ""
@@ -355,11 +363,11 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
 		return ""
 	}
+	defer f.Close()
 
 	// Write the body to file
 	bytesWritten, err := io.Copy(f, resp.Body)
 	if err != nil {
-		f.Close()
 		ErrorSend("Error clip write: "+err.Error(), bot, EventID)
 		return ""
 	}
@@ -367,14 +375,12 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 
 	// Check if we wrote anything
 	if bytesWritten == 0 {
-		f.Close()
 		WarnSend("No data written to clip file", bot, EventID)
 		return ""
 	}
 
 	// Ensure file is properly synced to disk
 	if err = f.Sync(); err != nil {
-		f.Close()
 		ErrorSend("Error syncing file to disk: "+err.Error(), bot, EventID)
 		return ""
 	}
@@ -408,13 +414,14 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 	PreviewURL := conf.FrigateURL + "/api/events/" + EventID + "/preview.mp4"
 	log.Debug.Println("Downloading preview from URL: " + PreviewURL)
 
-	// Generate uniq filename
+	// Generate unique filename
 	filename := "/tmp/" + EventID + "_preview.mp4"
 
 	// Download preview file
-	resp, err := http.Get(PreviewURL)
+	resp, err := httpClient.Get(PreviewURL)
 	if err != nil {
 		ErrorSend("Error preview download: "+err.Error(), bot, EventID)
+		return ""
 	}
 	defer resp.Body.Close()
 
@@ -436,6 +443,7 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 	f, err := os.Create(filename)
 	if err != nil {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
+		return ""
 	}
 	defer f.Close()
 
@@ -487,7 +495,7 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 		}
 		text += fmt.Sprintf("┣*Start time*\n┗ `%s", t_start) + "`\n"
 		if FrigateEvent.EndTime == 0 {
-			text += "┣*End time*\n┗ `In progess`" + "\n"
+			text += "┣*End time*\n┗ `In progress`" + "\n"
 		} else {
 			t_end := time.Unix(int64(FrigateEvent.EndTime), 0)
 			text += fmt.Sprintf("┣*End time*\n┗ `%s", t_end) + "`\n"
@@ -709,28 +717,28 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 		// Skip by camera
 		if !(len(conf.FrigateExcludeCamera) == 1 && conf.FrigateExcludeCamera[0] == "None") {
 			if StringsContains(FrigateEvents[Event].Camera, conf.FrigateExcludeCamera) {
-				log.Debug.Println("Skiping event from exclude camera: " + FrigateEvents[Event].Camera)
+				log.Debug.Println("Skipping event from exclude camera: " + FrigateEvents[Event].Camera)
 				continue
 			}
 		}
 		if !(len(conf.FrigateIncludeCamera) == 1 && conf.FrigateIncludeCamera[0] == "All") {
 			if !(StringsContains(FrigateEvents[Event].Camera, conf.FrigateIncludeCamera)) {
-				log.Debug.Println("Skiping event from include camera: " + FrigateEvents[Event].Camera)
+				log.Debug.Println("Skipping event from include camera: " + FrigateEvents[Event].Camera)
 				continue
 			}
 		}
-		// Skip by camera
+		// End skip by camera
 
 		// Skip by label
 		if !(len(conf.FrigateExcludeLabel) == 1 && conf.FrigateExcludeLabel[0] == "None") {
 			if StringsContains(FrigateEvents[Event].Label, conf.FrigateExcludeLabel) {
-				log.Debug.Println("Skiping event by exclude label: " + FrigateEvents[Event].Label)
+				log.Debug.Println("Skipping event by exclude label: " + FrigateEvents[Event].Label)
 				continue
 			}
 		}
 		if !(len(conf.FrigateIncludeLabel) == 1 && conf.FrigateIncludeLabel[0] == "All") {
 			if !(StringsContains(FrigateEvents[Event].Label, conf.FrigateIncludeLabel)) {
-				log.Debug.Println("Skiping event by include label: " + FrigateEvents[Event].Label)
+				log.Debug.Println("Skipping event by include label: " + FrigateEvents[Event].Label)
 				continue
 			}
 		}
@@ -743,7 +751,7 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 			if len(zones) != 0 {
 				for _, zone := range zones {
 					if StringsContains(zone, conf.FrigateExcludeZone) {
-						log.Debug.Println("Skiping event by exclude zone: " + zone)
+						log.Debug.Println("Skipping event by exclude zone: " + zone)
 						needSkip = true
 					}
 				}
@@ -759,7 +767,7 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 			}
 			for _, zone := range zones {
 				if !(StringsContains(zone, conf.FrigateIncludeZone)) {
-					log.Debug.Println("Skiping event by include zone: " + zone)
+					log.Debug.Println("Skipping event by include zone: " + zone)
 					needSkip = true
 				}
 			}
