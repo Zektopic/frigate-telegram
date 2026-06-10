@@ -1,11 +1,8 @@
 ---
-networks:
-  net:
-
 services:
   redis:
     image: redis:7.4-alpine
-    networks: [net]
+    network_mode: host
     restart: always
     command:
       - 'redis-server'
@@ -21,33 +18,29 @@ services:
       context: .
       dockerfile: docker/amd64/Dockerfile
     restart: always
-    networks: [net]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - 3232:8080
+    network_mode: host
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      FRIGATE_URL: ${FRIGATE_URL}
+      FRIGATE_URL: ${FRIGATE_URL:-http://localhost:5000}
       FRIGATE_EVENT_LIMIT: 5
       DEBUG: ${DEBUG:-false}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       SLEEP_TIME: ${SLEEP_TIME:-30}
       FRIGATE_EXTERNAL_URL: ${FRIGATE_EXTERNAL_URL}
       TZ: ${TZ:-UTC}
-      REDIS_ADDR: "redis:6379"
+      REDIS_ADDR: "localhost:6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       REST_API_ENABLE: ${REST_API_ENABLE:-false}
-      REST_API_LISTEN_ADDR: ":8080"
+      REST_API_LISTEN_ADDR: ":3232"
       REST_API_KEY: ${REST_API_KEY:-}
-      SWAGGER_HOST: ${SWAGGER_HOST:-localhost:8080}
+      SWAGGER_HOST: ${SWAGGER_HOST:-localhost:3232}
       TIME_WAIT_SAVE: ${TIME_WAIT_SAVE:-30}
       EVENT_BEFORE_SECONDS: ${EVENT_BEFORE_SECONDS:-300}
       INCLUDE_THUMBNAIL_EVENT: ${INCLUDE_THUMBNAIL_EVENT:-true}
       INCLUDE_CLIP_EVENT: ${INCLUDE_CLIP_EVENT:-true}
       INCLUDE_PREVIEW_EVENT: ${INCLUDE_PREVIEW_EVENT:-true}
     volumes:
-      - type: tmpfs # Optional
+      - type: tmpfs
         target: /tmp
         tmpfs:
           size: 500000000
