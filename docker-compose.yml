@@ -22,6 +22,8 @@ services:
       dockerfile: docker/amd64/Dockerfile
     restart: always
     networks: [net]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - 3232:8080
     environment:
