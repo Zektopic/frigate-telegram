@@ -67,7 +67,7 @@ func ChatBot(bot *tgbotapi.BotAPI, conf *config.Config) {
 }
 
 func Help(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.MessageConfig) {
-	if msg.BaseChat.ChatID == conf.TelegramChatID {
+	if msg.ChatID == conf.TelegramChatID {
 		text := "Stop send events: /stop\n"
 		text += "Resume send events: /resume\n"
 		text += "Mute send events: /mute\n"
@@ -82,7 +82,7 @@ func Help(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.Messa
 }
 
 func Status(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.MessageConfig) {
-	if msg.BaseChat.ChatID == conf.TelegramChatID {
+	if msg.ChatID == conf.TelegramChatID {
 		text := "Send event: `" + strconv.FormatBool(redis.GetStateSendEvent()) + "`\n"
 		text += "Mute event: `" + strconv.FormatBool(redis.GetStateMuteEvent()) + "`\n"
 		msg.Text = text
@@ -93,7 +93,7 @@ func Status(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.Mes
 }
 
 func Stop(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.MessageConfig) {
-	if msg.BaseChat.ChatID == conf.TelegramChatID {
+	if msg.ChatID == conf.TelegramChatID {
 		r := redis.SetStateSendEvent(true)
 		if r {
 			msg.Text = "Stop send message."
@@ -107,7 +107,7 @@ func Stop(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.Messa
 }
 
 func Resume(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.MessageConfig) {
-	if msg.BaseChat.ChatID == conf.TelegramChatID {
+	if msg.ChatID == conf.TelegramChatID {
 		r := redis.SetStateSendEvent(false)
 		if r {
 			msg.Text = "Resume send message."
@@ -121,7 +121,7 @@ func Resume(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.Mes
 }
 
 func Mute(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.MessageConfig) {
-	if msg.BaseChat.ChatID == conf.TelegramChatID {
+	if msg.ChatID == conf.TelegramChatID {
 		r := redis.SetStateMuteEvent(true)
 		if r {
 			msg.Text = "Mute send message."
@@ -135,7 +135,7 @@ func Mute(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.Messa
 }
 
 func Unmute(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.MessageConfig) {
-	if msg.BaseChat.ChatID == conf.TelegramChatID {
+	if msg.ChatID == conf.TelegramChatID {
 		r := redis.SetStateMuteEvent(false)
 		if r {
 			msg.Text = "Unmute send message."
