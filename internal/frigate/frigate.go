@@ -169,7 +169,11 @@ func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) strin
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
 		return ""
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			log.Error.Println("Error closing thumbnail file: " + err.Error())
+		}
+	}()
 
 	// Write data to file
 	bytesWritten, err := f.Write(dec)
@@ -226,7 +230,11 @@ func DownloadThumbnail(EventID string, bot *tgbotapi.BotAPI) string {
 		ErrorSend("Error thumbnail download: "+err.Error(), bot, EventID)
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Error.Println("Error closing response body: " + err.Error())
+		}
+	}()
 
 	// Check server response
 	if resp.StatusCode != http.StatusOK {
@@ -242,7 +250,11 @@ func DownloadThumbnail(EventID string, bot *tgbotapi.BotAPI) string {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
 		return ""
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			log.Error.Println("Error closing thumbnail file: " + err.Error())
+		}
+	}()
 
 	// Write the body to file
 	bytesWritten, err := io.Copy(f, resp.Body)
@@ -300,7 +312,11 @@ func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsSt
 		ErrorSend("Error get events from Frigate, error: "+err.Error(), bot, "ALL")
 		return EventsStruct{}
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Error.Println("Error closing response body: " + err.Error())
+		}
+	}()
 
 	// Check response status code
 	if resp.StatusCode != 200 {
@@ -347,7 +363,11 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 		ErrorSend("Error clip download: "+err.Error(), bot, EventID)
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Error.Println("Error closing response body: " + err.Error())
+		}
+	}()
 
 	// Check server response
 	if resp.StatusCode != http.StatusOK {
@@ -363,7 +383,11 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
 		return ""
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			log.Error.Println("Error closing clip file: " + err.Error())
+		}
+	}()
 
 	// Write the body to file
 	bytesWritten, err := io.Copy(f, resp.Body)
@@ -423,7 +447,11 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 		ErrorSend("Error preview download: "+err.Error(), bot, EventID)
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Error.Println("Error closing response body: " + err.Error())
+		}
+	}()
 
 	// Check server response
 	if resp.StatusCode != http.StatusOK {
@@ -445,7 +473,11 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
 		return ""
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			log.Error.Println("Error closing preview file: " + err.Error())
+		}
+	}()
 
 	// Write the body to file
 	bytesWritten, err := io.Copy(f, resp.Body)
@@ -525,7 +557,9 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 				log.Debug.Println("Base64 thumbnail failed, trying direct download")
 				// If base64 method failed, try direct download
 				if err == nil {
-					os.Remove(FilePathThumbnail) // Remove empty file
+					if removeErr := os.Remove(FilePathThumbnail); removeErr != nil {
+						log.Debug.Println("Error removing empty thumbnail file: " + removeErr.Error())
+					}
 				}
 				FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
 			}
@@ -678,15 +712,21 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 
 	// Now we can safely remove the files after the media group is sent
 	if hasClip {
-		os.Remove(FilePathClip)
+		if err := os.Remove(FilePathClip); err != nil {
+			log.Debug.Println("Error removing clip file: " + err.Error())
+		}
 	}
 
 	if hasPreview {
-		os.Remove(FilePathPreview)
+		if err := os.Remove(FilePathPreview); err != nil {
+			log.Debug.Println("Error removing preview file: " + err.Error())
+		}
 	}
 
 	if conf.IncludeThumbnailEvent {
-		os.Remove(FilePathThumbnail)
+		if err := os.Remove(FilePathThumbnail); err != nil {
+			log.Debug.Println("Error removing thumbnail file: " + err.Error())
+		}
 	}
 
 	var State string
@@ -715,13 +755,13 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 	}
 	for Event := range FrigateEvents {
 		// Skip by camera
-		if !(len(conf.FrigateExcludeCamera) == 1 && conf.FrigateExcludeCamera[0] == "None") {
+		if len(conf.FrigateExcludeCamera) != 1 || conf.FrigateExcludeCamera[0] != "None" {
 			if StringsContains(FrigateEvents[Event].Camera, conf.FrigateExcludeCamera) {
 				log.Debug.Println("Skipping event from exclude camera: " + FrigateEvents[Event].Camera)
 				continue
 			}
 		}
-		if !(len(conf.FrigateIncludeCamera) == 1 && conf.FrigateIncludeCamera[0] == "All") {
+		if len(conf.FrigateIncludeCamera) != 1 || conf.FrigateIncludeCamera[0] != "All" {
 			if !(StringsContains(FrigateEvents[Event].Camera, conf.FrigateIncludeCamera)) {
 				log.Debug.Println("Skipping event from include camera: " + FrigateEvents[Event].Camera)
 				continue
@@ -730,13 +770,13 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 		// End skip by camera
 
 		// Skip by label
-		if !(len(conf.FrigateExcludeLabel) == 1 && conf.FrigateExcludeLabel[0] == "None") {
+		if len(conf.FrigateExcludeLabel) != 1 || conf.FrigateExcludeLabel[0] != "None" {
 			if StringsContains(FrigateEvents[Event].Label, conf.FrigateExcludeLabel) {
 				log.Debug.Println("Skipping event by exclude label: " + FrigateEvents[Event].Label)
 				continue
 			}
 		}
-		if !(len(conf.FrigateIncludeLabel) == 1 && conf.FrigateIncludeLabel[0] == "All") {
+		if len(conf.FrigateIncludeLabel) != 1 || conf.FrigateIncludeLabel[0] != "All" {
 			if !(StringsContains(FrigateEvents[Event].Label, conf.FrigateIncludeLabel)) {
 				log.Debug.Println("Skipping event by include label: " + FrigateEvents[Event].Label)
 				continue
@@ -747,7 +787,7 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 		// Skip by zone
 		zones := GetTagList(FrigateEvents[Event].Zones)
 		needSkip := false
-		if !(len(conf.FrigateExcludeZone) == 1 && conf.FrigateExcludeZone[0] == "None") {
+		if len(conf.FrigateExcludeZone) != 1 || conf.FrigateExcludeZone[0] != "None" {
 			if len(zones) != 0 {
 				for _, zone := range zones {
 					if StringsContains(zone, conf.FrigateExcludeZone) {
@@ -760,7 +800,7 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 		if needSkip {
 			continue
 		}
-		if !(len(conf.FrigateIncludeZone) == 1 && conf.FrigateIncludeZone[0] == "All") {
+		if len(conf.FrigateIncludeZone) != 1 || conf.FrigateIncludeZone[0] != "All" {
 			if len(zones) == 0 {
 				log.Debug.Println("Skipping the event due to zero zones.")
 				continue
