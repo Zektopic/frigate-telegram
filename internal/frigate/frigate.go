@@ -1,6 +1,7 @@
 package frigate
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -71,7 +72,9 @@ type EventStruct struct {
 	Zones              []any       `json:"zones"`
 }
 
-var Event EventStruct
+// eventSemaphore limits concurrent event processing to prevent resource exhaustion.
+// Buffer size of 5 means at most 5 events are processed concurrently.
+var eventSemaphore = make(chan struct{}, 5)
 
 // httpClient is a shared HTTP client with a reasonable timeout to prevent
 // goroutine leaks when the Frigate server is unreachable or hangs.
@@ -409,11 +412,6 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 		return ""
 	}
 
-	if err = f.Close(); err != nil {
-		ErrorSend("Error closing clip file: "+err.Error(), bot, EventID)
-		return ""
-	}
-
 	// Verify file exists and has content
 	fileInfo, err := os.Stat(filename)
 	if err != nil {
@@ -729,8 +727,7 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 		}
 	}
 
-	var State string
-	State = "InProgress"
+	State := "InProgress"
 	if FrigateEvent.EndTime != 0 {
 		State = "Finished"
 	}
@@ -821,7 +818,12 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 			if WatchDog {
 				SendTextEvent(FrigateEvents[Event], bot)
 			} else {
-				go SendMessageEvent(FrigateEvents[Event], bot)
+				// Use semaphore to bound concurrent event processing
+				eventSemaphore <- struct{}{}
+				go func(event EventStruct) {
+					defer func() { <-eventSemaphore }()
+					SendMessageEvent(event, bot)
+				}(FrigateEvents[Event])
 			}
 		}
 	}
@@ -848,9 +850,15 @@ func SendTextEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 	redis.AddNewEvent("WatchDog_"+FrigateEvent.ID, "Finished", time.Duration(conf.RedisTTL)*time.Second)
 }
 
-func NotifyEvents(bot *tgbotapi.BotAPI, FrigateEventsURL string) {
+func NotifyEvents(bot *tgbotapi.BotAPI, FrigateEventsURL string, ctx context.Context) {
 	conf := config.New()
 	for {
+		select {
+		case <-ctx.Done():
+			log.Info.Println("NotifyEvents: shutting down watchdog loop.")
+			return
+		default:
+		}
 		FrigateEvents := GetEvents(FrigateEventsURL, bot, false)
 		ParseEvents(FrigateEvents, bot, true)
 		time.Sleep(time.Duration(conf.WatchDogSleepTime) * time.Second)

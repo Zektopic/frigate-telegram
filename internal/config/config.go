@@ -29,6 +29,8 @@ type Config struct {
 	RedisAddr               string
 	RedisPassword           string
 	RestAPIListenAddr       string
+	RestAPIKey              string
+	SwaggerHost             string
 	FrigateIncludeCamera    []string
 	FrigateExcludeCamera    []string
 	FrigateExcludeLabel     []string
@@ -68,6 +70,8 @@ func New() *Config {
 		IncludeClipEvent:        getEnvAsBool("INCLUDE_CLIP_EVENT", true),
 		IncludePreviewEvent:     getEnvAsBool("INCLUDE_PREVIEW_EVENT", true),
 		RestAPIListenAddr:       getEnv("REST_API_LISTEN_ADDR", ":8080"),
+		RestAPIKey:              getEnv("REST_API_KEY", ""),
+		SwaggerHost:             getEnv("SWAGGER_HOST", "localhost:8080"),
 	}
 }
 

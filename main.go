@@ -64,7 +64,7 @@ func main() {
 	FrigateEventsURL := conf.FrigateURL + "/api/events"
 
 	if conf.SendTextEvent {
-		go frigate.NotifyEvents(bot, FrigateEventsURL)
+		go frigate.NotifyEvents(bot, FrigateEventsURL, ctx)
 	}
 
 	// Starting loop for getting events from Frigate
