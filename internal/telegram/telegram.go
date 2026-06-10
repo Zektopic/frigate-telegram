@@ -58,7 +58,7 @@ func ChatBot(bot *tgbotapi.BotAPI, conf *config.Config) {
 
 		if !sendMessage {
 			msg = tgbotapi.NewMessage(update.Message.Chat.ID, "")
-			msg.Text = "I don't know that command"
+			msg.Text = "Command not available in this chat."
 		}
 		if _, err := bot.Send(msg); err != nil {
 			log.Error.Println("Error sending message: " + err.Error())
@@ -73,7 +73,7 @@ func Help(msg tgbotapi.MessageConfig, conf *config.Config) (bool, tgbotapi.Messa
 		text += "Mute send events: /mute\n"
 		text += "Unmute send events: /unmute\n"
 		text += "Current status: /status\n"
-		text += "Comand working only in chat id: `" + strconv.FormatInt(conf.TelegramChatID, 10) + "` (Current chat)"
+		text += "Command working only in chat id: `" + strconv.FormatInt(conf.TelegramChatID, 10) + "` (Current chat)"
 		msg.Text = text
 		msg.ParseMode = tgbotapi.ModeMarkdown
 		return true, msg

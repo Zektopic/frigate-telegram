@@ -23,11 +23,11 @@ var rdb = redis.NewClient(&redis.Options{
 	Protocol: conf.RedisProtocol, // specify 2 for RESP 2 or 3 for RESP 3
 })
 
-// Set state send event msg in redis
-func SetStateSendEvent(send bool) bool {
-	// send = false - send msg
-	// send = true - don't send msg
-	if send {
+// SetStateSendEvent controls whether event messages are sent.
+// Pass true to stop sending, false to resume sending.
+// Returns true on success, false if the Redis operation failed.
+func SetStateSendEvent(stop bool) bool {
+	if stop {
 		err := rdb.Set(ctx, RedisKeyStateSendEvent, 1, 0).Err()
 		if err != nil {
 			log.Error.Println(err)
@@ -40,17 +40,24 @@ func SetStateSendEvent(send bool) bool {
 	}
 }
 
-// Get state send event msg from redis
+// GetStateSendEvent returns whether events are currently being sent.
+// Returns true when events are being sent (key is not set).
+// Returns false when events are stopped (key is set).
 func GetStateSendEvent() bool {
-	// bool = false - send msg
-	// bool = true - don't send msg
 	_, err := rdb.Get(ctx, RedisKeyStateSendEvent).Result()
 	//nolint:gosimple
 	if err != nil {
+		// Key does not exist — events are being sent
 		return true
 	}
-
+	// Key exists — events are stopped
 	return false
+}
+
+// IsSendEnabled is a clearer alias for GetStateSendEvent.
+// Returns true when event sending is enabled.
+func IsSendEnabled() bool {
+	return GetStateSendEvent()
 }
 
 // Set state notify event msg in redis

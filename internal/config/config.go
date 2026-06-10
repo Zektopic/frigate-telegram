@@ -90,11 +90,11 @@ func getEnvAsInt(name string, defaultVal int) int {
 	return defaultVal
 }
 
-// Simple helper function to read an environment variable into integer or return a default value
+// Simple helper function to read an environment variable into int64 or return a default value
 func getEnvAsInt64(name string, defaultVal int64) int64 {
 	valueStr := getEnv(name, "")
-	if value, err := strconv.Atoi(valueStr); err == nil {
-		return int64(value)
+	if value, err := strconv.ParseInt(valueStr, 10, 64); err == nil {
+		return value
 	}
 
 	return defaultVal
