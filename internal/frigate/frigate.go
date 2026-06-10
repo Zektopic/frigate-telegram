@@ -293,6 +293,7 @@ func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsSt
 	resp, err := http.Get(FrigateURL)
 	if err != nil {
 		ErrorSend("Error get events from Frigate, error: "+err.Error(), bot, "ALL")
+		return EventsStruct{}
 	}
 	defer resp.Body.Close()
 
@@ -306,6 +307,7 @@ func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsSt
 	byteValue, err := io.ReadAll(resp.Body)
 	if err != nil {
 		ErrorSend("Can't read JSON: "+err.Error(), bot, "ALL")
+		return EventsStruct{}
 	}
 
 	// Parse data from JSON to struct
@@ -415,6 +417,7 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 	resp, err := http.Get(PreviewURL)
 	if err != nil {
 		ErrorSend("Error preview download: "+err.Error(), bot, EventID)
+		return ""
 	}
 	defer resp.Body.Close()
 
@@ -436,6 +439,7 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 	f, err := os.Create(filename)
 	if err != nil {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
+		return ""
 	}
 	defer f.Close()
 

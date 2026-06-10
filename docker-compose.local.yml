@@ -1,0 +1,5 @@
+---
+services:
+  frigate-telegram:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
