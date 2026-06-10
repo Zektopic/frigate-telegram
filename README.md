@@ -54,6 +54,8 @@ docker compose up -d
 | `FRIGATE_INCLUDE_ZONE` | `All` | List Include frigate zone, separate `,` |
 | `REST_API_ENABLE` | `False` | Enabling the http rest API |
 | `REST_API_LISTEN_ADDR` | `:8080` | Rest API listen addr |
+| `REST_API_KEY` | `""` | API key for authenticating REST API requests (X-API-Key header). Empty = no auth. |
+| `SWAGGER_HOST` | `localhost:8080` | Host used in Swagger UI for API requests |
 | `SHORT_EVENT_MESSAGE_FORMAT` | `False` | Short event message format |
 | `INCLUDE_THUMBNAIL_EVENT` | `True` | Include thumbnail from event to messsage |
 | `INCLUDE_CLIP_EVENT` | `True` | Include clip from event to messsage |

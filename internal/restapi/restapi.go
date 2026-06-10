@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/oldtyt/frigate-telegram/docs"
@@ -16,6 +17,28 @@ import (
 
 var redisErrorText string = "Error setting value, check logs."
 
+// apiKeyMiddleware returns a Gin middleware that validates the X-API-Key header
+// against the configured REST_API_KEY. If no API key is configured, all requests
+// are allowed (backward compatible). If a key is configured, requests without a
+// matching header receive a 401 Unauthorized response.
+func apiKeyMiddleware(apiKey string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if apiKey == "" {
+			c.Next()
+			return
+		}
+		providedKey := c.GetHeader("X-API-Key")
+		if providedKey != apiKey {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error":   true,
+				"message": "Unauthorized: invalid or missing API key",
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
 type ResponseApi struct {
 	IsError      bool   `json:"error"`
 	Message      string `json:"message"`
@@ -23,11 +46,11 @@ type ResponseApi struct {
 	MuteEvent    string `json:"mute_event,omitempty"`
 }
 
-func serverDocs(apiPath string) {
+func serverDocs(apiPath string, swaggerHost string) {
 	docs.SwaggerInfo.Title = "Frigate Telegram API"
 	docs.SwaggerInfo.Description = "This is manage API for frigate telegram service."
 	docs.SwaggerInfo.Version = "main"
-	docs.SwaggerInfo.Host = "localhost:8080"
+	docs.SwaggerInfo.Host = swaggerHost
 	docs.SwaggerInfo.BasePath = apiPath
 	// docs.SwaggerInfo.Schemes = []string{"http", "https"}
 }
@@ -189,19 +212,40 @@ func RunServer(conf *config.Config) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	apiPath := "/api/v1"
-	serverDocs(apiPath)
+	serverDocs(apiPath, conf.SwaggerHost)
 
+	// Apply API key authentication to control endpoints
+	authGroup := r.Group(apiPath)
+	authGroup.Use(apiKeyMiddleware(conf.RestAPIKey))
+	{
+		authGroup.GET("/stop", Stop)
+		authGroup.GET("/resume", Resume)
+		authGroup.GET("/mute", Mute)
+		authGroup.GET("/unmute", Unmute)
+		authGroup.GET("/status", Status)
+	}
+
+	// Ping endpoint is unauthenticated (healthcheck)
 	r.GET(apiPath+"/ping", Ping)
-	r.GET(apiPath+"/stop", Stop)
-	r.GET(apiPath+"/resume", Resume)
-	r.GET(apiPath+"/mute", Mute)
-	r.GET(apiPath+"/unmute", Unmute)
-	r.GET(apiPath+"/status", Status)
 
 	r.GET("/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	srv := &http.Server{
+		Addr:         conf.RestAPIListenAddr,
+		Handler:      r,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
 	log.Info.Println("Start Rest API on " + conf.RestAPIListenAddr)
-	err := r.Run(conf.RestAPIListenAddr)
-	if err != nil {
+	if conf.RestAPIKey != "" {
+		log.Info.Println("REST API authentication enabled (X-API-Key required)")
+	} else {
+		log.Warn.Println("REST API running without authentication — set REST_API_KEY for production")
+	}
+	err := srv.ListenAndServe()
+	if err != nil && err != http.ErrServerClosed {
 		log.Error.Fatalln("Error starting Rest API: " + err.Error())
 	}
 }

@@ -35,7 +35,11 @@ func SetStateSendEvent(stop bool) bool {
 		}
 		return true
 	} else {
-		rdb.Del(ctx, RedisKeyStateSendEvent)
+		err := rdb.Del(ctx, RedisKeyStateSendEvent).Err()
+		if err != nil {
+			log.Error.Println("SetStateSendEvent: Redis Del error: " + err.Error())
+			return false
+		}
 		return true
 	}
 }
@@ -72,7 +76,11 @@ func SetStateMuteEvent(mute bool) bool {
 		}
 		return true
 	} else {
-		rdb.Del(ctx, RedisKeyStateMuteEvent)
+		err := rdb.Del(ctx, RedisKeyStateMuteEvent).Err()
+		if err != nil {
+			log.Error.Println("SetStateMuteEvent: Redis Del error: " + err.Error())
+			return false
+		}
 		return true
 	}
 }
@@ -99,14 +107,18 @@ func AddNewEvent(EventID string, State string, RedisTTL time.Duration) {
 func CheckEvent(EventID string) bool {
 	event, err := rdb.Exists(ctx, EventID).Result()
 	if err != nil {
-		log.Error.Println(err)
+		log.Error.Println("CheckEvent: Redis Exists error: " + err.Error())
+		// On Redis error, skip the event to avoid spamming duplicates
+		return false
 	}
 	if event == 0 {
 		return true
 	}
 	val, err := rdb.Get(ctx, EventID).Result()
 	if err != nil {
-		log.Error.Println(err)
+		log.Error.Println("CheckEvent: Redis Get error: " + err.Error())
+		// On Redis error, skip the event rather than making decisions on empty data
+		return false
 	}
 	if val == "InProgress" {
 		return true
