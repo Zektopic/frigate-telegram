@@ -15,6 +15,14 @@ cd frigate-telegram
 ./deploy.sh
 ```
 
+Alternatively:
+1. Install docker
+2. Download `docker-compose.yml` file:
+```bash
+curl -O https://raw.githubusercontent.com/Zektopic/frigate-telegram/main/docker-compose.yml
+```
+```
+
 The interactive script will:
 1. Help you create a Telegram bot (via @BotFather)
 2. Help you find your chat ID
@@ -142,6 +150,7 @@ Send these commands to your bot in Telegram:
 > **Security:** Commands only work from the configured `TELEGRAM_CHAT_ID` chat.
 
 ### REST API
+For more details Swagger available on: `http://localhost:8080/docs/index.html`
 
 Enable with `REST_API_ENABLE=true`. All control endpoints require `X-API-Key` header when `REST_API_KEY` is set.
 
