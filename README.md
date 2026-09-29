@@ -99,7 +99,10 @@ docker compose up -d
 | `FRIGATE_EVENT_LIMIT` | `20` | Max events per poll |
 | `EVENT_BEFORE_SECONDS` | `300` | Only events within this many seconds |
 | `SLEEP_TIME` | `5` | Seconds between polls |
-| `TIME_WAIT_SAVE` | `30` | Seconds to wait for clip to be ready |
+| `TIME_WAIT_SAVE` | `30` | Seconds after an event ends before its clip is downloaded |
+| `CLIP_RETRY_TIMEOUT` | `300` | How long to keep retrying a clip Frigate can't provide yet (0 = no retries) |
+| `MEDIA_DOWNLOAD_TIMEOUT` | `300` | Timeout in seconds for one clip/preview download |
+| `EVENT_WORKERS` | `1` | Events sent at the same time; others wait in a queue |
 | `WATCH_DOG_SLEEP_TIME` | `3` | Watchdog poll interval (text events) |
 | **Media** | | |
 | `INCLUDE_THUMBNAIL_EVENT` | `true` | Attach thumbnail image |
@@ -203,8 +206,9 @@ internal/
 - **Redis circuit breaker**: After 5 consecutive Redis failures, event processing pauses until Redis recovers
 - **Config validation**: Required fields checked at startup — fails fast with clear errors
 - **Graceful shutdown**: SIGTERM/SIGINT triggers clean shutdown with Telegram notification
-- **Concurrency limit**: Max 5 simultaneous event processors (prevents resource exhaustion)
-- **HTTP timeouts**: 60s Frigate client timeout, 10s/60s REST API timeouts
+- **Event queue**: Finished events are queued and sent by `EVENT_WORKERS` workers (default 1), so slow machines aren't overloaded
+- **Clip retries**: Clips that Frigate can't provide yet are retried for up to `CLIP_RETRY_TIMEOUT` seconds; if a clip still can't be attached, the message says why
+- **HTTP timeouts**: 60s Frigate API timeout, `MEDIA_DOWNLOAD_TIMEOUT` (300s) for clip downloads, 10s/60s REST API timeouts
 
 ---
 
@@ -236,6 +240,11 @@ docker compose up -d --build
 - If you see "circuit breaker OPEN" in logs, Redis was down for 5+ consecutive operations
 - Redis will auto-recover and the circuit will reset
 
+**Only the thumbnail arrives, no video?**
+- The caption says why the clip is missing (e.g. over Telegram's 50 MB limit, or Frigate didn't provide it)
+- On slow hardware, raise `TIME_WAIT_SAVE`, `CLIP_RETRY_TIMEOUT` or `MEDIA_DOWNLOAD_TIMEOUT`
+- Events are sent after they end, so a long event arrives when it finishes
+
 **Duplicate events?**
 - Events are deduplicated by ID using Redis
 - To reset: `docker compose exec redis redis-cli -a <password> FLUSHDB`
@@ -251,6 +260,6 @@ This is a fork of [OldTyT/frigate-telegram](https://github.com/OldTyT/frigate-te
 - Error notification throttling
 - Config validation
 - Graceful shutdown
-- Concurrency limiting
+- Event queue with clip retries for slow machines
 - Docker health checks and log rotation
 - Interactive deployment script

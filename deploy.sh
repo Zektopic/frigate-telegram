@@ -183,7 +183,7 @@ prompt "Poll interval in seconds [30]:"
 read -r SLEEP_TIME
 SLEEP_TIME="${SLEEP_TIME:-30}"
 
-prompt "Wait time for clip to be ready, in seconds [30]:"
+prompt "Seconds to wait after an event ends before downloading its clip [30]:"
 read -r TIME_WAIT_SAVE
 TIME_WAIT_SAVE="${TIME_WAIT_SAVE:-30}"
 

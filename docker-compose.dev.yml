@@ -29,4 +29,4 @@ services:
       - type: tmpfs # Optional
         target: /tmp
         tmpfs:
-          size: 10000000
+          size: 500000000
