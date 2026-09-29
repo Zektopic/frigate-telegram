@@ -74,6 +74,9 @@ func main() {
 
 	FrigateEventsURL := conf.FrigateURL + "/api/events"
 
+	// Starting workers that send queued events to Telegram
+	frigate.StartEventWorkers(ctx, bot, conf.EventWorkers)
+
 	if conf.SendTextEvent {
 		go frigate.NotifyEvents(bot, FrigateEventsURL, ctx)
 	}

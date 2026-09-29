@@ -21,7 +21,8 @@ internal/
 
 | Goroutine | Started in | Purpose |
 |-----------|-----------|---------|
-| Main loop | `main()` | Polls Frigate events every `SLEEP_TIME` seconds, sends new ones |
+| Main loop | `main()` | Polls Frigate events every `SLEEP_TIME` seconds, queues finished ones |
+| Event workers | `main()` → `StartEventWorkers()` | `EVENT_WORKERS` goroutines that send queued events |
 | WatchDog loop | `main()` → `NotifyEvents()` | Polls Frigate events every `WATCH_DOG_SLEEP_TIME` seconds, sends text-only alerts |
 | REST API | `main()` → `RunServer()` | Optional Gin HTTP server (only if `REST_API_ENABLE=true`) |
 | Telegram bot | `main()` → `ChatBot()` | Long-polling Telegram update channel for commands |
@@ -29,9 +30,9 @@ internal/
 ### Data flow
 
 1. `GetEvents(FrigateURL, bot, SetBefore)` → HTTP GET Frigate `/api/events?...`
-2. `ParseEvents(FrigateEvents, bot, WatchDog)` → filter by camera/label/zone, check Redis for duplicates
-3. `SendMessageEvent(event, bot)` → download media (thumbnail via base64 or HTTP, clip, preview), build `MediaGroupConfig`, send via Telegram bot
-4. Redis key `{EventID}` with TTL tracks seen events; `InProgress` = allow re-send, `Finished` = skip
+2. `ParseEvents(FrigateEvents, bot, WatchDog)` → filter by camera/label/zone, skip events that haven't ended `TIME_WAIT_SAVE` seconds ago, check Redis for duplicates, queue the rest
+3. `SendMessageEvent(ctx, event, bot)` (in a worker) → download media (thumbnail via base64 or HTTP, clip with retries, preview), build `MediaGroupConfig`, send via Telegram bot with retries
+4. Redis key `{EventID}` with TTL tracks seen events; `Finished` = skip
 
 ## Configuration
 
@@ -47,6 +48,10 @@ Key variables:
 | `FRIGATE_EXTERNAL_URL` | `http://localhost:5000` | External URL embedded in messages |
 | `REDIS_ADDR` | `localhost:6379` | |
 | `SLEEP_TIME` | `5` | Seconds between main-loop polls |
+| `TIME_WAIT_SAVE` | `30` | Seconds after an event ends before its clip is downloaded |
+| `EVENT_WORKERS` | `1` | Events sent concurrently |
+| `CLIP_RETRY_TIMEOUT` | `300` | Seconds to keep retrying a failed clip download |
+| `MEDIA_DOWNLOAD_TIMEOUT` | `300` | Timeout per clip/preview download |
 | `DEBUG` | `false` | Enables debug logging + bot debug |
 
 ## Build & Run
@@ -93,15 +98,17 @@ docker compose -f docker-compose.dev.yml up -d
 
 5. **Telegram media group limit** — clips > 50 MB are skipped (Telegram limit).
 
-6. **Event dedup** — events are tracked in Redis by their Frigate event ID. An event in `InProgress` state will be re-sent (Frigate may update it). An event in `Finished` state is skipped. `InWork` means a goroutine is currently processing it.
+6. **Event dedup** — events are tracked in Redis by their Frigate event ID. An event in `Finished` state is skipped. Events that are queued or being sent are tracked in memory (`queuedEvents`), so a slow send is never picked up twice. `InProgress` / `InWork` values are only written by older versions; `CheckEvent` still understands them.
 
 7. **Redis circuit breaker** — after 5 consecutive Redis failures, the circuit opens and event processing pauses until Redis recovers. This prevents event spam storms when Redis is down. Check `IsRedisHealthy()` before processing.
 
 8. **Config validation** — `Config.Validate()` runs at startup and exits with clear errors if required fields (bot token, chat ID, Frigate URL) are missing. This prevents cryptic runtime panics.
 
-9. **Concurrency limit** — event processing is bounded by a semaphore (max 5 concurrent). Prevents resource exhaustion during event floods.
+9. **Event queue** — finished events go into `eventQueue` and are sent by `EVENT_WORKERS` workers (default 1). Waiting is preferred over parallel downloads: on weak machines, parallel clip builds made Frigate too slow and clips were dropped.
 
 10. **Graceful shutdown** — SIGINT/SIGTERM triggers context cancellation, cleanly stopping the main loop and NotifyEvents watchdog. A shutdown message is sent to Telegram.
+
+11. **Clip downloads** — Frigate builds `clip.mp4` from recording segments on request and streams it while ffmpeg runs, so a download can be slow or fail until the segments are saved. `SaveClip` retries for `CLIP_RETRY_TIMEOUT` seconds, each attempt with a `MEDIA_DOWNLOAD_TIMEOUT` timeout (the 60s API timeout is too short). Media goes to unique `os.CreateTemp` files. If the clip still can't be attached, the caption says why.
 
 ## Security
 

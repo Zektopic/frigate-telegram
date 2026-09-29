@@ -22,6 +22,9 @@ type Config struct {
 	RedisTTL                int
 	WatchDogSleepTime       int
 	EventBeforeSeconds      int
+	EventWorkers            int
+	MediaDownloadTimeout    int
+	ClipRetryTimeout        int
 	TelegramChatID          int64
 	TelegramBotToken        string
 	FrigateURL              string
@@ -57,6 +60,9 @@ func New() *Config {
 		RedisProtocol:           getEnvAsInt("REDIS_PROTOCOL", 3),
 		RedisTTL:                getEnvAsInt("REDIS_TTL", 1209600), // 7 days
 		EventBeforeSeconds:      getEnvAsInt("EVENT_BEFORE_SECONDS", 300),
+		EventWorkers:            getEnvAsInt("EVENT_WORKERS", 1),
+		MediaDownloadTimeout:    getEnvAsInt("MEDIA_DOWNLOAD_TIMEOUT", 300),
+		ClipRetryTimeout:        getEnvAsInt("CLIP_RETRY_TIMEOUT", 300),
 		SendTextEvent:           getEnvAsBool("SEND_TEXT_EVENT", false),
 		FrigateExcludeCamera:    getEnvAsSlice("FRIGATE_EXCLUDE_CAMERA", []string{"None"}, ","),
 		FrigateIncludeCamera:    getEnvAsSlice("FRIGATE_INCLUDE_CAMERA", []string{"All"}, ","),
@@ -149,6 +155,15 @@ func (c *Config) Validate() []string {
 	}
 	if c.TimeWaitSave < 0 {
 		errs = append(errs, "TIME_WAIT_SAVE must be non-negative")
+	}
+	if c.EventWorkers < 1 {
+		errs = append(errs, "EVENT_WORKERS must be at least 1")
+	}
+	if c.MediaDownloadTimeout < 1 {
+		errs = append(errs, "MEDIA_DOWNLOAD_TIMEOUT must be at least 1 second")
+	}
+	if c.ClipRetryTimeout < 0 {
+		errs = append(errs, "CLIP_RETRY_TIMEOUT must be non-negative")
 	}
 	if c.RedisTTL < 1 {
 		errs = append(errs, "REDIS_TTL must be at least 1 second")

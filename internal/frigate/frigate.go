@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,12 +74,36 @@ type EventStruct struct {
 	Zones              []any       `json:"zones"`
 }
 
-// eventSemaphore limits concurrent event processing to prevent resource exhaustion.
-// Buffer size of 5 means at most 5 events are processed concurrently.
-var eventSemaphore = make(chan struct{}, 5)
+// telegramMaxUploadSize is the largest file a bot can upload.
+// See https://github.com/OldTyT/frigate-telegram/issues/5
+const telegramMaxUploadSize = 50 * 1024 * 1024
+
+// telegramSendAttempts is how many times a message is sent before giving up.
+const telegramSendAttempts = 3
+
+// clipRetryDelay is the wait before the first clip download retry. It doubles
+// after every failed attempt, up to 2 minutes.
+var clipRetryDelay = 15 * time.Second
+
+// eventQueue holds finished events waiting to be sent. A fixed pool of
+// EVENT_WORKERS workers drains it, so slow machines aren't overloaded by
+// parallel clip downloads and uploads: events wait in line instead of
+// losing their clip.
+var eventQueue = make(chan EventStruct, 100)
+
+// queuedEvents holds the IDs of events that are queued or being sent, so a
+// slow send is never picked up a second time by a later poll.
+var (
+	queuedEvents   = make(map[string]struct{})
+	queuedEventsMu sync.Mutex
+)
+
+// errMediaTooLarge means a file is over the Telegram upload limit.
+var errMediaTooLarge = errors.New("file is larger than the Telegram upload limit")
 
 // httpClient is a shared HTTP client with a reasonable timeout to prevent
 // goroutine leaks when the Frigate server is unreachable or hangs.
+// Clips and previews use downloadMedia instead, which has a longer timeout.
 var httpClient = &http.Client{
 	Timeout: 60 * time.Second,
 }
@@ -388,86 +413,47 @@ func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsSt
 	return events
 }
 
-func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
+// SaveClip downloads the event clip to /tmp. Frigate builds clips from
+// recording segments on request, which is slow on weaker hardware and fails
+// until the segments are saved, so failed or empty downloads are retried with
+// backoff for up to CLIP_RETRY_TIMEOUT seconds. On failure it returns "" and a
+// short reason to show in the message caption.
+func SaveClip(ctx context.Context, EventID string) (string, string) {
 	// Get config
 	conf := config.New()
 
 	// Generate clip URL
 	ClipURL := conf.FrigateURL + "/api/events/" + EventID + "/clip.mp4"
-	log.Debug.Println("Downloading clip from URL: " + ClipURL)
 
-	// Generate unique filename
-	filename := "/tmp/" + EventID + ".mp4"
-
-	// Download clip file
-	resp, err := httpClient.Get(ClipURL)
-	if err != nil {
-		ErrorSend("Error clip download: "+err.Error(), bot, EventID)
-		return ""
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Error.Println("Error closing response body: " + err.Error())
+	deadline := time.Now().Add(time.Duration(conf.ClipRetryTimeout) * time.Second)
+	delay := clipRetryDelay
+	for attempt := 1; ; attempt++ {
+		log.Debug.Printf("Downloading clip from URL: %s (attempt %d)", ClipURL, attempt)
+		filename, err := downloadMedia(ctx, conf, ClipURL, EventID+"-*.mp4", telegramMaxUploadSize)
+		if err == nil {
+			return filename, ""
 		}
-	}()
-
-	// Check server response
-	if resp.StatusCode != http.StatusOK {
-		ErrorSend("Return bad status: "+resp.Status, bot, EventID)
-		return ""
-	}
-
-	log.Debug.Printf("Expected content length: %d bytes", resp.ContentLength)
-
-	// Create clip file
-	f, err := os.Create(filename)
-	if err != nil {
-		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
-		return ""
-	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			log.Error.Println("Error closing clip file: " + err.Error())
+		if errors.Is(err, errMediaTooLarge) {
+			return "", "larger than the 50 MB Telegram limit"
 		}
-	}()
+		if ctx.Err() != nil {
+			return "", "shutting down"
+		}
+		log.Warn.Printf("Clip download for event %s failed (attempt %d): %s", EventID, attempt, err.Error())
 
-	// Write the body to file
-	bytesWritten, err := io.Copy(f, resp.Body)
-	if err != nil {
-		ErrorSend("Error clip write: "+err.Error(), bot, EventID)
-		return ""
+		if time.Now().Add(delay).After(deadline) {
+			return "", fmt.Sprintf("not available from Frigate after %d attempts", attempt)
+		}
+		if !sleepContext(ctx, delay) {
+			return "", "shutting down"
+		}
+		delay = min(delay*2, 2*time.Minute)
 	}
-	log.Debug.Printf("Written %d bytes to %s", bytesWritten, filename)
-
-	// Check if we wrote anything
-	if bytesWritten == 0 {
-		WarnSend("No data written to clip file", bot, EventID)
-		return ""
-	}
-
-	// Ensure file is properly synced to disk
-	if err = f.Sync(); err != nil {
-		ErrorSend("Error syncing file to disk: "+err.Error(), bot, EventID)
-		return ""
-	}
-
-	// Verify file exists and has content
-	fileInfo, err := os.Stat(filename)
-	if err != nil {
-		ErrorSend("Error verifying clip file: "+err.Error(), bot, EventID)
-		return ""
-	}
-
-	if fileInfo.Size() == 0 {
-		ErrorSend("Clip file is empty after download", bot, EventID)
-		return ""
-	}
-
-	log.Debug.Printf("Successfully downloaded clip to %s (size: %d bytes)", filename, fileInfo.Size())
-	return filename
 }
 
-func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
+// SavePreview downloads the event preview to /tmp. Previews are optional, so
+// failures are only logged and "" is returned.
+func SavePreview(ctx context.Context, EventID string) string {
 	// Get config
 	conf := config.New()
 
@@ -475,14 +461,31 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 	PreviewURL := conf.FrigateURL + "/api/events/" + EventID + "/preview.mp4"
 	log.Debug.Println("Downloading preview from URL: " + PreviewURL)
 
-	// Generate unique filename
-	filename := "/tmp/" + EventID + "_preview.mp4"
-
-	// Download preview file
-	resp, err := httpClient.Get(PreviewURL)
+	filename, err := downloadMedia(ctx, conf, PreviewURL, EventID+"-*_preview.mp4", telegramMaxUploadSize)
 	if err != nil {
-		ErrorSend("Error preview download: "+err.Error(), bot, EventID)
+		// Preview might not be available in older Frigate versions or if not generated yet
+		log.Debug.Printf("Preview not available, skipping: %s", err.Error())
 		return ""
+	}
+	return filename
+}
+
+// downloadMedia downloads url into a new file in /tmp named after pattern
+// (see os.CreateTemp) and returns its path. A unique file per download means
+// two sends can never overwrite or delete each other's files. Downloads that
+// fail, are empty, or are larger than maxSize leave no file behind.
+func downloadMedia(ctx context.Context, conf *config.Config, url string, pattern string, maxSize int64) (string, error) {
+	// Frigate streams clips while ffmpeg assembles them, so the whole transfer
+	// can take minutes on slow hardware; the 60s API timeout is too short.
+	client := &http.Client{Timeout: time.Duration(conf.MediaDownloadTimeout) * time.Second}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -490,56 +493,63 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 		}
 	}()
 
-	// Check server response
 	if resp.StatusCode != http.StatusOK {
-		// Preview might not be available in older Frigate versions or if not generated yet
-		log.Debug.Printf("Preview not available (status %d), skipping", resp.StatusCode)
-		return ""
+		return "", fmt.Errorf("bad status: %s", resp.Status)
+	}
+	if resp.ContentLength > maxSize {
+		return "", errMediaTooLarge
 	}
 
-	// Read content length if available
-	contentLength := resp.ContentLength
-	if contentLength == 0 {
-		log.Debug.Println("Received empty preview from server (content length is 0)")
-		return ""
-	}
-
-	// Create preview file
-	f, err := os.Create(filename)
+	f, err := os.CreateTemp("/tmp", pattern)
 	if err != nil {
-		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
-		return ""
+		return "", err
 	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			log.Error.Println("Error closing preview file: " + err.Error())
-		}
-	}()
 
-	// Write the body to file
-	bytesWritten, err := io.Copy(f, resp.Body)
+	// Read one byte past maxSize to detect oversized streams without
+	// buffering all of them to disk.
+	bytesWritten, err := io.Copy(f, io.LimitReader(resp.Body, maxSize+1))
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil && bytesWritten == 0 {
+		err = errors.New("empty response")
+	}
+	if err == nil && bytesWritten > maxSize {
+		err = errMediaTooLarge
+	}
 	if err != nil {
-		ErrorSend("Error preview write: "+err.Error(), bot, EventID)
-		return ""
+		removeFile(f.Name())
+		return "", err
 	}
 
-	if bytesWritten == 0 {
-		return ""
-	}
-
-	if err = f.Sync(); err != nil {
-		ErrorSend("Error syncing preview file to disk: "+err.Error(), bot, EventID)
-		return ""
-	}
-
-	return filename
+	log.Debug.Printf("Downloaded %d bytes to %s", bytesWritten, f.Name())
+	return f.Name(), nil
 }
 
-func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
+// sleepContext waits for d and returns true, or returns false early if ctx is
+// cancelled.
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func removeFile(path string) {
+	if err := os.Remove(path); err != nil {
+		log.Debug.Println("Error removing file: " + err.Error())
+	}
+}
+
+// SendMessageEvent sends an event to Telegram with its thumbnail, clip and
+// preview attached. If the clip can't be attached, the caption says why.
+func SendMessageEvent(ctx context.Context, FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 	// Get config
 	conf := config.New()
-
-	redis.AddNewEvent(FrigateEvent.ID, "InWork", time.Duration(60)*time.Second)
 
 	// Prepare text message
 	text := ""
@@ -578,199 +588,163 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 		text += "┗[Source clip](" + conf.FrigateExternalURL + "/api/events/" + FrigateEvent.ID + "/clip.mp4)\n"
 	}
 
-	var medias []interface{}
 	var FilePathThumbnail string
-
 	if conf.IncludeThumbnailEvent {
-		// Save thumbnail
-		if FrigateEvent.Thumbnail != "" {
-			// Try to use the base64 thumbnail first
-			log.Debug.Println("Using base64 thumbnail from event data")
-			FilePathThumbnail = SaveThumbnail(FrigateEvent.ID, FrigateEvent.Thumbnail, bot)
-
-			// Verify thumbnail file has content
-			fileInfo, err := os.Stat(FilePathThumbnail)
-			if err != nil || fileInfo.Size() == 0 {
-				log.Debug.Println("Base64 thumbnail failed, trying direct download")
-				// If base64 method failed, try direct download
-				if err == nil {
-					if removeErr := os.Remove(FilePathThumbnail); removeErr != nil {
-						log.Debug.Println("Error removing empty thumbnail file: " + removeErr.Error())
-					}
-				}
-				FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
-			}
-		} else {
-			// No thumbnail in event data, download directly
-			log.Debug.Println("No thumbnail in event data, downloading directly")
-			FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
-		}
-
-		// Verify thumbnail file before adding to media group
-		thumbnailInfo, err := os.Stat(FilePathThumbnail)
-		if err != nil {
-			ErrorSend("Error getting thumbnail file info: "+err.Error(), bot, FrigateEvent.ID)
-			FilePathThumbnail = ""
-		} else if thumbnailInfo.Size() == 0 {
-			log.Error.Printf("Thumbnail file is empty: %s", FilePathThumbnail)
-			ErrorSend("Cannot send empty thumbnail file", bot, FrigateEvent.ID)
-			FilePathThumbnail = ""
-		}
-
+		FilePathThumbnail = saveEventThumbnail(FrigateEvent, bot)
 		if FilePathThumbnail != "" {
-			MediaThumbnail := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(FilePathThumbnail))
-			MediaThumbnail.Caption = text
-			MediaThumbnail.ParseMode = tgbotapi.ModeMarkdown
-			medias = append(medias, MediaThumbnail)
+			defer removeFile(FilePathThumbnail)
 		}
 	}
 
-	// Define FilePathClip outside the if block to make it available later
-	var FilePathClip string
-	var hasClip bool
-
-	if conf.IncludeClipEvent && FrigateEvent.HasClip && FrigateEvent.EndTime != 0 {
-		// Wait for fully video event created
-		log.Debug.Printf("Waiting %d seconds for clip to be ready", conf.TimeWaitSave)
-		time.Sleep(time.Duration(conf.TimeWaitSave) * time.Second)
-
-		// Save clip
-		FilePathClip = SaveClip(FrigateEvent.ID, bot)
-		hasClip = true
-		if FilePathClip == "" {
-			hasClip = false
+	var videos []string
+	clipNote := ""
+	if conf.IncludeClipEvent && FrigateEvent.HasClip {
+		FilePathClip, reason := SaveClip(ctx, FrigateEvent.ID)
+		if ctx.Err() != nil {
+			// Shutting down: leave the event unmarked so it's sent after restart.
+			return
 		}
-		if hasClip {
-			videoInfo, err := os.Stat(FilePathClip)
-			if err != nil {
-				ErrorSend("Error receiving information about the clip file: "+err.Error(), bot, FrigateEvent.ID)
-				hasClip = false
-			} else if videoInfo.Size() == 0 {
-				log.Error.Printf("Clip file is empty: %s", FilePathClip)
-				hasClip = false
-			}
-			if hasClip {
-				if videoInfo.Size() < 52428800 {
-					// Telegram don't send large file see for more: https://github.com/OldTyT/frigate-telegram/issues/5
-					// Add clip to media group
-					log.Debug.Printf("Adding clip to media group: %s (size: %d bytes)", FilePathClip, videoInfo.Size())
-					MediaClip := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(FilePathClip))
-
-					if !conf.IncludeThumbnailEvent {
-						MediaClip.Caption = text
-						MediaClip.ParseMode = tgbotapi.ModeMarkdown
-					}
-
-					medias = append(medias, MediaClip)
-				} else {
-					log.Debug.Printf("Clip file size is too large: %d bytes (limit: 52428800)", videoInfo.Size())
-				}
-			}
+		if FilePathClip != "" {
+			defer removeFile(FilePathClip)
+			videos = append(videos, FilePathClip)
+		} else {
+			log.Warn.Printf("Sending event %s without clip: %s", FrigateEvent.ID, reason)
+			clipNote = "\n⚠️ Clip not attached: " + reason
 		}
 	}
-
-	// Handle Preview (Video Snippet)
-	var FilePathPreview string
-	var hasPreview bool
 
 	if conf.IncludePreviewEvent {
-		FilePathPreview = SavePreview(FrigateEvent.ID, bot)
-		if FilePathPreview != "" {
-			hasPreview = true
-			previewInfo, err := os.Stat(FilePathPreview)
-			if err == nil && previewInfo.Size() > 0 && previewInfo.Size() < 52428800 {
-				log.Debug.Printf("Adding preview to media group: %s (size: %d bytes)", FilePathPreview, previewInfo.Size())
-				MediaPreview := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(FilePathPreview))
-				if len(medias) == 0 {
-					MediaPreview.Caption = text
-					MediaPreview.ParseMode = tgbotapi.ModeMarkdown
-				}
-				medias = append(medias, MediaPreview)
-			} else {
-				hasPreview = false
-				if err != nil {
-					log.Debug.Printf("Error stating preview file: %s", err.Error())
-				}
-			}
+		if FilePathPreview := SavePreview(ctx, FrigateEvent.ID); FilePathPreview != "" {
+			defer removeFile(FilePathPreview)
+			videos = append(videos, FilePathPreview)
 		}
 	}
 
-	log.Debug.Printf("Sending media group with %d items", len(medias))
-
-	if len(medias) != 0 {
-		// Create message
-		msg := tgbotapi.MediaGroupConfig{
-			ChatID: conf.TelegramChatID,
-			Media:  medias,
+	log.Debug.Printf("Sending event %s with %d video(s)", FrigateEvent.ID, len(videos))
+	err := sendEventMessage(ctx, bot, conf, text+clipNote, FilePathThumbnail, videos)
+	if err != nil && len(videos) > 0 && ctx.Err() == nil {
+		// Still deliver the event if Telegram keeps rejecting the video upload.
+		log.Warn.Printf("Retrying event %s without video: %s", FrigateEvent.ID, err.Error())
+		if clipNote == "" {
+			clipNote = "\n⚠️ Video not attached: upload to Telegram failed"
 		}
-		msg.DisableNotification = redis.GetStateMuteEvent()
+		err = sendEventMessage(ctx, bot, conf, text+clipNote, FilePathThumbnail, nil)
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			// Shutting down: leave the event unmarked so it's sent after restart.
+			return
+		}
+		ErrorSend("Error sending event to Telegram: "+err.Error(), bot, FrigateEvent.ID)
+	}
 
-		messages, err := bot.SendMediaGroup(msg)
-		if err != nil {
-			log.Error.Printf("Failed to send media group: %s", err.Error())
-			if strings.Contains(err.Error(), "file must be non-empty") {
-				// Try to get more information about the files we're trying to send
-				for i, media := range medias {
-					switch m := media.(type) {
-					case tgbotapi.InputMediaPhoto:
-						if filePath, ok := m.Media.(tgbotapi.FilePath); ok {
-							fileInfo, statErr := os.Stat(string(filePath))
-							if statErr != nil {
-								log.Error.Printf("Media item %d: Cannot get file info: %s", i, statErr.Error())
-							} else {
-								log.Error.Printf("Media item %d: Photo file exists, size: %d bytes", i, fileInfo.Size())
-							}
-						}
-					case tgbotapi.InputMediaVideo:
-						if filePath, ok := m.Media.(tgbotapi.FilePath); ok {
-							fileInfo, statErr := os.Stat(string(filePath))
-							if statErr != nil {
-								log.Error.Printf("Media item %d: Cannot get file info: %s", i, statErr.Error())
-							} else {
-								log.Error.Printf("Media item %d: Video file exists, size: %d bytes", i, fileInfo.Size())
-							}
-						}
-					}
-				}
+	redis.AddNewEvent(FrigateEvent.ID, "Finished", time.Duration(conf.RedisTTL)*time.Second)
+}
+
+// saveEventThumbnail saves the event thumbnail to /tmp, from the base64 data
+// in the event if possible, otherwise by downloading it. Returns "" on failure.
+func saveEventThumbnail(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) string {
+	var FilePathThumbnail string
+	if FrigateEvent.Thumbnail != "" {
+		// Try to use the base64 thumbnail first
+		log.Debug.Println("Using base64 thumbnail from event data")
+		FilePathThumbnail = SaveThumbnail(FrigateEvent.ID, FrigateEvent.Thumbnail, bot)
+
+		// Verify thumbnail file has content
+		fileInfo, err := os.Stat(FilePathThumbnail)
+		if err != nil || fileInfo.Size() == 0 {
+			log.Debug.Println("Base64 thumbnail failed, trying direct download")
+			// If base64 method failed, try direct download
+			if err == nil {
+				removeFile(FilePathThumbnail)
 			}
-			ErrorSend("Error send media group message: "+err.Error(), bot, FrigateEvent.ID)
-		}
-
-		if messages == nil {
-			ErrorSend("No received messages", bot, FrigateEvent.ID)
+			FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
 		}
 	} else {
-		msg := tgbotapi.NewMessage(conf.TelegramChatID, "")
-		msg.Text = text
-		if _, err := bot.Send(msg); err != nil {
-			log.Error.Println("Error sending message: " + err.Error())
-		}
+		// No thumbnail in event data, download directly
+		log.Debug.Println("No thumbnail in event data, downloading directly")
+		FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
 	}
 
-	// Now we can safely remove the files after the media group is sent
-	if hasClip {
-		if err := os.Remove(FilePathClip); err != nil {
-			log.Debug.Println("Error removing clip file: " + err.Error())
+	// Verify thumbnail file before adding to media group
+	thumbnailInfo, err := os.Stat(FilePathThumbnail)
+	if err != nil {
+		ErrorSend("Error getting thumbnail file info: "+err.Error(), bot, FrigateEvent.ID)
+		return ""
+	}
+	if thumbnailInfo.Size() == 0 {
+		log.Error.Printf("Thumbnail file is empty: %s", FilePathThumbnail)
+		ErrorSend("Cannot send empty thumbnail file", bot, FrigateEvent.ID)
+		removeFile(FilePathThumbnail)
+		return ""
+	}
+	return FilePathThumbnail
+}
+
+// sendEventMessage sends the thumbnail and videos as one media group with
+// the caption on the first item, or a text message if there is no media.
+func sendEventMessage(ctx context.Context, bot *tgbotapi.BotAPI, conf *config.Config, text string, thumbnail string, videos []string) error {
+	var medias []interface{}
+	if thumbnail != "" {
+		MediaThumbnail := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(thumbnail))
+		MediaThumbnail.Caption = text
+		MediaThumbnail.ParseMode = tgbotapi.ModeMarkdown
+		medias = append(medias, MediaThumbnail)
+	}
+	for _, video := range videos {
+		MediaVideo := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(video))
+		if len(medias) == 0 {
+			MediaVideo.Caption = text
+			MediaVideo.ParseMode = tgbotapi.ModeMarkdown
 		}
+		medias = append(medias, MediaVideo)
 	}
 
-	if hasPreview {
-		if err := os.Remove(FilePathPreview); err != nil {
-			log.Debug.Println("Error removing preview file: " + err.Error())
-		}
+	if len(medias) == 0 {
+		msg := tgbotapi.NewMessage(conf.TelegramChatID, text)
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		msg.DisableNotification = redis.GetStateMuteEvent()
+		return sendWithRetry(ctx, func() error {
+			_, err := bot.Send(msg)
+			return err
+		})
 	}
 
-	if conf.IncludeThumbnailEvent {
-		if err := os.Remove(FilePathThumbnail); err != nil {
-			log.Debug.Println("Error removing thumbnail file: " + err.Error())
-		}
+	msg := tgbotapi.MediaGroupConfig{
+		ChatID: conf.TelegramChatID,
+		Media:  medias,
 	}
+	msg.DisableNotification = redis.GetStateMuteEvent()
+	return sendWithRetry(ctx, func() error {
+		_, err := bot.SendMediaGroup(msg)
+		return err
+	})
+}
 
-	State := "InProgress"
-	if FrigateEvent.EndTime != 0 {
-		State = "Finished"
+// sendWithRetry calls send until it succeeds or telegramSendAttempts is
+// reached, backing off between attempts and honouring Telegram flood control.
+func sendWithRetry(ctx context.Context, send func() error) error {
+	delay := 5 * time.Second
+	for attempt := 1; ; attempt++ {
+		err := send()
+		if err == nil {
+			return nil
+		}
+		log.Warn.Printf("Telegram send failed (attempt %d/%d): %s", attempt, telegramSendAttempts, err.Error())
+		if attempt >= telegramSendAttempts {
+			return err
+		}
+
+		wait := delay
+		var tgErr *tgbotapi.Error
+		if errors.As(err, &tgErr) && tgErr.RetryAfter > 0 {
+			wait = time.Duration(tgErr.RetryAfter) * time.Second
+		}
+		if !sleepContext(ctx, wait) {
+			return err
+		}
+		delay *= 2
 	}
-	redis.AddNewEvent(FrigateEvent.ID, State, time.Duration(conf.RedisTTL)*time.Second)
 }
 
 func StringsContains(MyStr string, MySlice []string) bool {
@@ -853,18 +827,81 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 		}
 		// Skip by zone
 
+		if !WatchDog {
+			if !eventReadyToSend(FrigateEvents[Event], conf) {
+				log.Debug.Println("Event not finished yet, will send it later: " + FrigateEvents[Event].ID)
+				continue
+			}
+			if isEventQueued(FrigateEvents[Event].ID) {
+				continue
+			}
+		}
+
 		if redis.CheckEvent(RedisKeyPrefix + FrigateEvents[Event].ID) {
 			if WatchDog {
 				SendTextEvent(FrigateEvents[Event], bot)
 			} else {
-				// Use semaphore to bound concurrent event processing
-				eventSemaphore <- struct{}{}
-				go func(event EventStruct) {
-					defer func() { <-eventSemaphore }()
-					SendMessageEvent(event, bot)
-				}(FrigateEvents[Event])
+				enqueueEvent(FrigateEvents[Event])
 			}
 		}
+	}
+}
+
+// eventReadyToSend reports whether an event can be sent with all its media.
+// Events are only sent once they have ended and, if a clip will be attached,
+// TIME_WAIT_SAVE seconds after the end so Frigate can save the recording.
+// Events that aren't ready are picked up again by a later poll.
+func eventReadyToSend(event EventStruct, conf *config.Config) bool {
+	if event.EndTime == 0 {
+		return false
+	}
+	if !conf.IncludeClipEvent || !event.HasClip {
+		return true
+	}
+	endTime := time.Unix(int64(event.EndTime), 0)
+	return time.Since(endTime) >= time.Duration(conf.TimeWaitSave)*time.Second
+}
+
+func isEventQueued(EventID string) bool {
+	queuedEventsMu.Lock()
+	defer queuedEventsMu.Unlock()
+	_, ok := queuedEvents[EventID]
+	return ok
+}
+
+// enqueueEvent queues an event for the workers. If the queue is full the event
+// is left for the next poll.
+func enqueueEvent(event EventStruct) {
+	queuedEventsMu.Lock()
+	defer queuedEventsMu.Unlock()
+	select {
+	case eventQueue <- event:
+		queuedEvents[event.ID] = struct{}{}
+		log.Debug.Printf("Queued event %s (%d waiting)", event.ID, len(eventQueue))
+	default:
+		log.Warn.Printf("Event queue is full, event %s will be retried on the next poll", event.ID)
+	}
+}
+
+// StartEventWorkers starts n workers that send queued events one at a time
+// until ctx is cancelled.
+func StartEventWorkers(ctx context.Context, bot *tgbotapi.BotAPI, n int) {
+	for i := 0; i < n; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event := <-eventQueue:
+					SendMessageEvent(ctx, event, bot)
+					// Released only after SendMessageEvent has marked the event in
+					// Redis, so the next poll can't queue it again.
+					queuedEventsMu.Lock()
+					delete(queuedEvents, event.ID)
+					queuedEventsMu.Unlock()
+				}
+			}
+		}()
 	}
 }
 
