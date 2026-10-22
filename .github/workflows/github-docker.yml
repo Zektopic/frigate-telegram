@@ -10,12 +10,14 @@ on:
 jobs:
   build_amd64:
     name: "[amd64] Build & Push"
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, manupa-hnx]
     env:
       REPOSITORY_URL: ghcr.io
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        - name: Configure Git safe directory
+          run: git config --global --add safe.directory '*'
       - name: Variables
         id: vars
         run: |
@@ -41,12 +43,14 @@ jobs:
         run: docker push --all-tags $REPOSITORY_URL/$IMAGE_NAME
   build_arm32v6:
     name: "[arm32v6] Build & Push"
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, manupa-hnx]
     env:
       REPOSITORY_URL: ghcr.io
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        - name: Configure Git safe directory
+          run: git config --global --add safe.directory '*'
       - name: Variables
         id: vars
         run: |
@@ -70,12 +74,14 @@ jobs:
           -f docker/arm32v6/Dockerfile --push .
   build_arm32v7:
     name: "[arm32v7] Build & Push"
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, manupa-hnx]
     env:
       REPOSITORY_URL: ghcr.io
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        - name: Configure Git safe directory
+          run: git config --global --add safe.directory '*'
       - name: Variables
         id: vars
         run: |
@@ -99,12 +105,14 @@ jobs:
           -f docker/arm32v7/Dockerfile --push .
   build_arm64v8:
     name: "[arm64v8] Build & Push"
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, manupa-hnx]
     env:
       REPOSITORY_URL: ghcr.io
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        - name: Configure Git safe directory
+          run: git config --global --add safe.directory '*'
       - name: Variables
         id: vars
         run: |

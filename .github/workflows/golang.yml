@@ -8,9 +8,11 @@ on:
 jobs:
   golangci:
     name: Lint check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, manupa-hnx]
     steps:
       - uses: actions/checkout@v5
+      - name: Configure Git safe directory
+        run: git config --global --add safe.directory '*'
       - uses: actions/setup-go@v5
         with:
           go-version: 1.25.x
