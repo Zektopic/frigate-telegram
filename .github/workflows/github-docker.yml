@@ -16,8 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        - name: Configure Git safe directory
-          run: git config --global --add safe.directory '*'
+      - name: Configure Git safe directory
+        run: git config --global --add safe.directory '*'
       - name: Variables
         id: vars
         run: |
@@ -49,8 +49,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        - name: Configure Git safe directory
-          run: git config --global --add safe.directory '*'
+      - name: Configure Git safe directory
+        run: git config --global --add safe.directory '*'
       - name: Variables
         id: vars
         run: |
@@ -80,8 +80,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        - name: Configure Git safe directory
-          run: git config --global --add safe.directory '*'
+      - name: Configure Git safe directory
+        run: git config --global --add safe.directory '*'
       - name: Variables
         id: vars
         run: |
@@ -111,8 +111,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        - name: Configure Git safe directory
-          run: git config --global --add safe.directory '*'
+      - name: Configure Git safe directory
+        run: git config --global --add safe.directory '*'
       - name: Variables
         id: vars
         run: |
