@@ -22,7 +22,7 @@ func LogFunc() {
 	// Debug messages are dropped unless DEBUG is set. A logger writing to
 	// io.Discard returns before formatting the message or looking up the
 	// caller's file and line, which /dev/null would still do for every line.
-	var debugOut io.Writer = io.Discard
+	debugOut := io.Discard
 	if conf.Debug {
 		debugOut = os.Stdout
 	}
