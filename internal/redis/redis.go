@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -153,32 +154,22 @@ func AddNewEvent(EventID string, State string, RedisTTL time.Duration) {
 	recordRedisSuccess()
 }
 
+// CheckEvent reports whether an event still needs to be sent. It runs for
+// every polled event, so it uses a single GET: a missing key means the event
+// is new.
 func CheckEvent(EventID string) bool {
-	event, err := rdb.Exists(ctx, EventID).Result()
-	if err != nil {
-		log.Error.Println("CheckEvent: Redis Exists error: " + err.Error())
-		recordRedisFailure()
-		return false
-	}
-	if event == 0 {
+	val, err := rdb.Get(ctx, EventID).Result()
+	if errors.Is(err, redis.Nil) {
 		recordRedisSuccess()
 		return true
 	}
-	val, err := rdb.Get(ctx, EventID).Result()
 	if err != nil {
 		log.Error.Println("CheckEvent: Redis Get error: " + err.Error())
 		recordRedisFailure()
 		return false
 	}
 	recordRedisSuccess()
-	if val == "InProgress" {
-		return true
-	}
-	if val == "Finished" {
-		return false
-	}
-	if val == "InWork" {
-		return false
-	}
-	return false
+	// "Finished" means sent. "InProgress" and "InWork" are only written by
+	// older versions; an InProgress event was never sent.
+	return val == "InProgress"
 }

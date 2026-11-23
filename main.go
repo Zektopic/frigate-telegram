@@ -56,7 +56,7 @@ func main() {
 	}
 
 	// Initializing telegram bot
-	bot, err := tgbotapi.NewBotAPI(conf.TelegramBotToken)
+	bot, err := telegram.NewBot(conf.TelegramBotToken)
 	if err != nil {
 		log.Error.Fatalln("Error initializing telegram bot: " + err.Error())
 	}
@@ -83,6 +83,21 @@ func main() {
 
 	// Starting loop for getting events from Frigate
 	for {
+		if redis.GetStateSendEvent() {
+			if redis.IsRedisHealthy() {
+				events := frigate.GetEvents(ctx, FrigateEventsURL, bot, true)
+				frigate.ParseEvents(events, bot, false)
+			} else {
+				log.Debug.Println("Redis circuit breaker open — skipping event processing")
+			}
+		} else {
+			log.Debug.Println("Skipping send events.")
+		}
+
+		// Wait for the next poll, but stop right away on shutdown: Docker
+		// kills the container 10s after SIGTERM, which is shorter than a
+		// typical SLEEP_TIME.
+		log.Debug.Println("Sleeping for " + strconv.Itoa(conf.SleepTime) + " seconds.")
 		select {
 		case <-ctx.Done():
 			log.Info.Println("Shutdown: stopping event polling loop.")
@@ -91,20 +106,7 @@ func main() {
 				log.Error.Println("Error sending shutdown message: " + err.Error())
 			}
 			return
-		default:
+		case <-time.After(time.Duration(conf.SleepTime) * time.Second):
 		}
-
-		if redis.GetStateSendEvent() {
-			if redis.IsRedisHealthy() {
-				events := frigate.GetEvents(FrigateEventsURL, bot, true)
-				frigate.ParseEvents(events, bot, false)
-			} else {
-				log.Debug.Println("Redis circuit breaker open — skipping event processing")
-			}
-		} else {
-			log.Debug.Println("Skipping send events.")
-		}
-		time.Sleep(time.Duration(conf.SleepTime) * time.Second)
-		log.Debug.Println("Sleeping for " + strconv.Itoa(conf.SleepTime) + " seconds.")
 	}
 }

@@ -19,15 +19,14 @@ var (
 func LogFunc() {
 	conf := config.New()
 	Trace = log.New(io.Discard, "TRACE: ", log.Ldate|log.Ltime|log.Lshortfile)
-	file, err := os.OpenFile("/dev/null", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		log.Fatal(err)
-	}
-	// Send debug message to /dev/null if debug is disabled
+	// Debug messages are dropped unless DEBUG is set. A logger writing to
+	// io.Discard returns before formatting the message or looking up the
+	// caller's file and line, which /dev/null would still do for every line.
+	debugOut := io.Discard
 	if conf.Debug {
-		file = os.Stdout
+		debugOut = os.Stdout
 	}
-	Debug = log.New(file, "DEBUG: ", log.Ldate|log.Ltime|log.Lshortfile)
+	Debug = log.New(debugOut, "DEBUG: ", log.Ldate|log.Ltime|log.Lshortfile)
 	Info = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
 	Warn = log.New(os.Stdout, "WARNING: ", log.Ldate|log.Ltime|log.Lshortfile)
 	Error = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile)

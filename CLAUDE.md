@@ -14,6 +14,7 @@ internal/
   redis/redis.go                  — Redis client: stop/mute flags + event dedup TTL
   restapi/restapi.go              — Gin HTTP server: /api/v1/{ping,stop,resume,mute,unmute,status}
   telegram/telegram.go            — Telegram bot command handler (/ping, /stop, /resume, …)
+  telegram/client.go              — NewBot: Telegram client with timeouts that redacts the token from errors
   log/log.go                      — leveled stdout/stderr loggers (Debug, Info, Warn, Error, Trace)
 ```
 
@@ -29,9 +30,9 @@ internal/
 
 ### Data flow
 
-1. `GetEvents(FrigateURL, bot, SetBefore)` → HTTP GET Frigate `/api/events?...`
+1. `GetEvents(ctx, FrigateURL, bot, SetBefore)` → HTTP GET Frigate `/api/events?...&include_thumbnails=0` (response capped at 32 MB)
 2. `ParseEvents(FrigateEvents, bot, WatchDog)` → filter by camera/label/zone, skip events that haven't ended `TIME_WAIT_SAVE` seconds ago, check Redis for duplicates, queue the rest
-3. `SendMessageEvent(ctx, event, bot)` (in a worker) → download media (thumbnail via base64 or HTTP, clip with retries, preview), build `MediaGroupConfig`, send via Telegram bot with retries
+3. `SendMessageEvent(ctx, event, bot)` (in a worker) → download media (thumbnail via HTTP, or base64 if the event has one; clip with retries; preview), build `MediaGroupConfig`, send via Telegram bot with retries
 4. Redis key `{EventID}` with TTL tracks seen events; `Finished` = skip
 
 ## Configuration
@@ -94,7 +95,7 @@ docker compose -f docker-compose.dev.yml up -d
 
 3. **The `GetStateSendEvent` / `SetStateSendEvent` naming is inverted**: `SetStateSendEvent(true)` means **stop** sending. `GetStateSendEvent()` returns `true` when the stop key is **not** set (i.e., sending is active). This double inversion works but is confusing — see the Redis key name `FrigateTelegramStopSendEventMessage` for the original intent.
 
-4. **Media files go to `/tmp`** — the Docker Compose mounts a tmpfs there. Files are cleaned up after sending.
+4. **Media files go to `/tmp`** — the Docker Compose mounts a tmpfs there. Every file (thumbnail, clip, preview) is a unique `os.CreateTemp` file; never build a path from the event ID, which comes from Frigate's API. Files are cleaned up after sending.
 
 5. **Telegram media group limit** — clips > 50 MB are skipped (Telegram limit).
 
@@ -106,15 +107,17 @@ docker compose -f docker-compose.dev.yml up -d
 
 9. **Event queue** — finished events go into `eventQueue` and are sent by `EVENT_WORKERS` workers (default 1). Waiting is preferred over parallel downloads: on weak machines, parallel clip builds made Frigate too slow and clips were dropped.
 
-10. **Graceful shutdown** — SIGINT/SIGTERM triggers context cancellation, cleanly stopping the main loop and NotifyEvents watchdog. A shutdown message is sent to Telegram.
+10. **Graceful shutdown** — SIGINT/SIGTERM triggers context cancellation, cleanly stopping the main loop and NotifyEvents watchdog. A shutdown message is sent to Telegram. The loops' sleeps and the Frigate requests honour the context, so shutdown finishes within Docker's 10s stop timeout even with a long `SLEEP_TIME`.
 
 11. **Clip downloads** — Frigate builds `clip.mp4` from recording segments on request and streams it while ffmpeg runs, so a download can be slow or fail until the segments are saved. `SaveClip` retries for `CLIP_RETRY_TIMEOUT` seconds, each attempt with a `MEDIA_DOWNLOAD_TIMEOUT` timeout (the 60s API timeout is too short). Media goes to unique `os.CreateTemp` files. If the clip still can't be attached, the caption says why.
 
 ## Security
 
-- **REST API authentication**: Set `REST_API_KEY` to require `X-API-Key` header on control endpoints (/stop, /resume, /mute, /unmute, /status). /ping is always unauthenticated for healthchecks.
-- **HTTP timeouts**: REST API has Read/Write/Idle timeouts (10s/10s/60s).
-- **Host networking**: Both Redis and frigate-telegram use host networking in production to match Frigate's network mode. This means ports are bound directly on the host.
+- **REST API authentication**: Set `REST_API_KEY` to require `X-API-Key` header on control endpoints (/stop, /resume, /mute, /unmute, /status). /ping is always unauthenticated for healthchecks. Keys are compared as SHA-256 hashes in constant time.
+- **Bot token redaction**: Telegram URLs contain the bot token and Go's HTTP errors contain the URL. Always create the bot with `telegram.NewBot`, whose HTTP client strips the token from errors before they reach logs or chat messages.
+- **HTTP timeouts**: REST API has Read/Write/Idle timeouts (10s/10s/60s). Telegram requests time out 2 min after the request is sent (uploads themselves aren't limited).
+- **Host networking**: Both Redis and frigate-telegram use host networking in production to match Frigate's network mode. This means ports are bound directly on the host, so Redis is started with `--bind 127.0.0.1 -::1`.
+- **Docker build context**: `.dockerignore` keeps `.env` and `.git` out of the build context.
 
 ## Production Deployment
 

@@ -1,14 +1,18 @@
 FROM golang:1.26.4-alpine AS builder
 
-WORKDIR $GOPATH/frigate-telegram
-COPY . $GOPATH/frigate-telegram
+WORKDIR /src
 
-RUN apk --no-cache add binutils && \
-    go build . && \
-    strip frigate-telegram
+# Download modules in their own layer, so code changes don't download them
+# again (slow on emulated ARM builds).
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+# Static binary; -s -w strips symbols and debug info like the old strip step.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /frigate-telegram .
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
-COPY --from=builder /go/frigate-telegram/frigate-telegram /frigate-telegram
+COPY --from=builder /frigate-telegram /frigate-telegram
 
 ENTRYPOINT ["/frigate-telegram"]

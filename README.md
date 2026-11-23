@@ -208,7 +208,14 @@ internal/
 - **Graceful shutdown**: SIGTERM/SIGINT triggers clean shutdown with Telegram notification
 - **Event queue**: Finished events are queued and sent by `EVENT_WORKERS` workers (default 1), so slow machines aren't overloaded
 - **Clip retries**: Clips that Frigate can't provide yet are retried for up to `CLIP_RETRY_TIMEOUT` seconds; if a clip still can't be attached, the message says why
-- **HTTP timeouts**: 60s Frigate API timeout, `MEDIA_DOWNLOAD_TIMEOUT` (300s) for clip downloads, 10s/60s REST API timeouts
+- **HTTP timeouts**: 60s Frigate API timeout, `MEDIA_DOWNLOAD_TIMEOUT` (300s) for clip downloads, 2 min Telegram response timeout, 10s/60s REST API timeouts
+
+### Security
+
+- **Bot token never logged**: the bot token is removed from network errors before they're logged or sent to the chat
+- **Redis on localhost only**: with host networking, Redis listens on `127.0.0.1` / `::1` instead of every interface
+- **Constant-time API key check** for the REST API
+- **No secrets in the build**: `.dockerignore` keeps `.env` out of the Docker build context
 
 ---
 

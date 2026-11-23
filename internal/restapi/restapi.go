@@ -1,6 +1,8 @@
 package restapi
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -21,14 +23,18 @@ var redisErrorText string = "Error setting value, check logs."
 // against the configured REST_API_KEY. If no API key is configured, all requests
 // are allowed (backward compatible). If a key is configured, requests without a
 // matching header receive a 401 Unauthorized response.
+//
+// The keys are compared as SHA-256 hashes in constant time, so response timing
+// reveals neither the key's contents nor its length.
 func apiKeyMiddleware(apiKey string) gin.HandlerFunc {
+	wantHash := sha256.Sum256([]byte(apiKey))
 	return func(c *gin.Context) {
 		if apiKey == "" {
 			c.Next()
 			return
 		}
-		providedKey := c.GetHeader("X-API-Key")
-		if providedKey != apiKey {
+		providedHash := sha256.Sum256([]byte(c.GetHeader("X-API-Key")))
+		if subtle.ConstantTimeCompare(providedHash[:], wantHash[:]) != 1 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error":   true,
 				"message": "Unauthorized: invalid or missing API key",
@@ -211,6 +217,11 @@ func Status(c *gin.Context) {
 func RunServer(conf *config.Config) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+	// Don't trust X-Forwarded-For from arbitrary clients: no proxy is
+	// configured, so client IPs come from the connection.
+	if err := r.SetTrustedProxies(nil); err != nil {
+		log.Error.Println("Error setting trusted proxies: " + err.Error())
+	}
 	apiPath := "/api/v1"
 	serverDocs(apiPath, conf.SwaggerHost)
 

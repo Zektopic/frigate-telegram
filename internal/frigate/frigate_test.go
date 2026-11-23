@@ -2,11 +2,13 @@ package frigate
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,5 +214,86 @@ func TestSendMessageEventExplainsMissingClip(t *testing.T) {
 	caption, _ := telegram.sent[0][0]["caption"].(string)
 	if !strings.Contains(caption, "Clip not attached: not available from Frigate after 1 attempts") {
 		t.Errorf("caption should explain the missing clip: %q", caption)
+	}
+}
+
+func TestNormalizeTagText(t *testing.T) {
+	tests := map[string]string{
+		"front_door":        "frontdoor",
+		"Cam-02 (garage)":   "Cam02garage",
+		"license_plate":     "licenseplate",
+		"ünïcødé 9":         "ncd9",
+		"":                  "",
+		"already0K":         "already0K",
+		"\xff\xfeinvalid-1": "invalid1",
+	}
+	for in, want := range tests {
+		if got := NormalizeTagText(in); got != want {
+			t.Errorf("NormalizeTagText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func BenchmarkNormalizeTagText(b *testing.B) {
+	for b.Loop() {
+		NormalizeTagText("front_door-cam 2 (garage) ünï")
+	}
+}
+
+func TestGetEvents(t *testing.T) {
+	bot := setupSend(t, "http://unused", &fakeTelegram{})
+	var gotQuery url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		switch r.URL.Path {
+		case "/api/events":
+			_, _ = fmt.Fprint(w, `[{"id":"1700000000.000003-abc","camera":"front","label":"person"}]`)
+		case "/huge/api/events":
+			_, _ = w.Write([]byte("["))
+			_, _ = w.Write([]byte(strings.Repeat(" ", maxEventsResponseSize)))
+			_, _ = w.Write([]byte("]"))
+		}
+	}))
+	defer server.Close()
+
+	events := GetEvents(context.Background(), server.URL+"/api/events", bot, false)
+	if len(events) != 1 || events[0].ID != "1700000000.000003-abc" {
+		t.Fatalf("got %+v, want one event", events)
+	}
+	if gotQuery.Get("include_thumbnails") != "0" {
+		t.Errorf("thumbnails should be left out of polls, query was %v", gotQuery)
+	}
+
+	if events := GetEvents(context.Background(), server.URL+"/huge/api/events", bot, false); len(events) != 0 {
+		t.Errorf("oversized response: got %d events, want none", len(events))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if events := GetEvents(ctx, server.URL+"/api/events", bot, false); len(events) != 0 {
+		t.Errorf("cancelled context: got %d events, want none", len(events))
+	}
+}
+
+func TestSaveThumbnailUsesUniqueTempFile(t *testing.T) {
+	bot := setupSend(t, "http://unused", &fakeTelegram{})
+	data := base64.StdEncoding.EncodeToString([]byte("jpeg"))
+
+	path := SaveThumbnail("1700000000.000004-thumb", data, bot)
+	if path == "" {
+		t.Fatal("thumbnail not saved")
+	}
+	defer removeFile(path)
+	if filepath.Dir(path) != "/tmp" || !strings.HasPrefix(filepath.Base(path), "1700000000.000004-thumb-") {
+		t.Errorf("unexpected thumbnail path %q", path)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "jpeg" {
+		t.Errorf("thumbnail content = %q, want %q", got, "jpeg")
+	}
+
+	// Event IDs come from Frigate's API and must not be able to pick the path.
+	if path := SaveThumbnail("../../escape", data, bot); path != "" {
+		removeFile(path)
+		t.Errorf("event ID with a path separator was written to %q", path)
 	}
 }

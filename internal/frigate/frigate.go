@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +78,13 @@ type EventStruct struct {
 // See https://github.com/OldTyT/frigate-telegram/issues/5
 const telegramMaxUploadSize = 50 * 1024 * 1024
 
+// telegramMaxPhotoSize is the largest photo a bot can send.
+const telegramMaxPhotoSize = 10 * 1024 * 1024
+
+// maxEventsResponseSize caps how much of an /api/events response is read, so a
+// misbehaving server can't exhaust memory.
+const maxEventsResponseSize = 32 * 1024 * 1024
+
 // telegramSendAttempts is how many times a message is sent before giving up.
 const telegramSendAttempts = 3
 
@@ -140,20 +147,19 @@ func throttleWarnSend() bool {
 	return true
 }
 
+// NormalizeTagText keeps only the ASCII letters and digits of text, so it can
+// be used as a Telegram hashtag. It runs several times per event, so it works
+// on bytes: every byte of a multi-byte UTF-8 rune is >= 0x80 and is dropped.
 func NormalizeTagText(text string) string {
-	var alphabetCheck = regexp.MustCompile(`^[A-Za-z]+$`)
-	var NormalizedText []string
-	runes := []rune(text)
-	for i := 0; i < len(runes); i++ {
-		wordString := fmt.Sprintf("%c", runes[i])
-		if _, err := strconv.Atoi(wordString); err == nil {
-			NormalizedText = append(NormalizedText, wordString)
-		}
-		if alphabetCheck.MatchString(wordString) {
-			NormalizedText = append(NormalizedText, wordString)
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if ('0' <= c && c <= '9') || ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') {
+			b.WriteByte(c)
 		}
 	}
-	return strings.Join(NormalizedText, "")
+	return b.String()
 }
 
 func GetTagList(subLabel interface{}) []string {
@@ -205,6 +211,8 @@ func WarnSend(TextError string, bot *tgbotapi.BotAPI, EventID string) {
 	}
 }
 
+// SaveThumbnail writes the base64 thumbnail from the event data to a new file
+// in /tmp and returns its path, or "" on failure.
 func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) string {
 	log.Debug.Printf("Processing thumbnail for event ID: %s", EventID)
 
@@ -220,150 +228,66 @@ func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) strin
 		ErrorSend("Error when base64 string decode: "+err.Error(), bot, EventID)
 		return ""
 	}
-
-	// Check if we got any data after decoding
 	if len(dec) == 0 {
 		ErrorSend("Decoded thumbnail is empty", bot, EventID)
 		return ""
 	}
 
-	log.Debug.Printf("Decoded thumbnail size: %d bytes", len(dec))
-
-	// Generate uniq filename
-	filename := "/tmp/" + EventID + ".jpg"
-	f, err := os.Create(filename)
+	// A unique file, like downloadMedia: the event ID comes from Frigate's API
+	// and isn't used as a path, and os.CreateTemp rejects IDs containing "/".
+	f, err := os.CreateTemp("/tmp", EventID+"-*.jpg")
 	if err != nil {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
 		return ""
 	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			log.Error.Println("Error closing thumbnail file: " + err.Error())
-		}
-	}()
-
-	// Write data to file
-	bytesWritten, err := f.Write(dec)
+	_, err = f.Write(dec)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
+		removeFile(f.Name())
 		ErrorSend("Error when write file: "+err.Error(), bot, EventID)
 		return ""
 	}
 
-	// Check if we wrote anything
-	if bytesWritten == 0 {
-		ErrorSend("No data written to thumbnail file", bot, EventID)
-		return ""
-	}
-
-	log.Debug.Printf("Written %d bytes to %s", bytesWritten, filename)
-
-	// Ensure file is properly synced to disk
-	err = f.Sync()
-	if err != nil {
-		ErrorSend("Error when sync file: "+err.Error(), bot, EventID)
-		return ""
-	}
-
-	// Verify file exists and has content
-	fileInfo, err := os.Stat(filename)
-	if err != nil {
-		ErrorSend("Error verifying thumbnail file: "+err.Error(), bot, EventID)
-		return ""
-	}
-
-	if fileInfo.Size() == 0 {
-		ErrorSend("Thumbnail file is empty after write", bot, EventID)
-		return ""
-	}
-
-	log.Debug.Printf("Successfully saved thumbnail to %s (size: %d bytes)", filename, fileInfo.Size())
-	return filename
+	log.Debug.Printf("Saved %d byte thumbnail to %s", len(dec), f.Name())
+	return f.Name()
 }
 
-func DownloadThumbnail(EventID string, bot *tgbotapi.BotAPI) string {
+// DownloadThumbnail downloads the event thumbnail to a new file in /tmp and
+// returns its path, or "" on failure.
+func DownloadThumbnail(ctx context.Context, EventID string, bot *tgbotapi.BotAPI) string {
 	// Get config
 	conf := config.New()
 
-	// Generate thumbnail URL
-	ThumbnailURL := conf.FrigateURL + "/api/events/" + EventID + "/thumbnail.jpg"
+	ThumbnailURL := eventFileURL(conf.FrigateURL, EventID, "thumbnail.jpg")
 	log.Debug.Println("Downloading thumbnail from URL: " + ThumbnailURL)
 
-	// Generate uniq filename
-	filename := "/tmp/" + EventID + ".jpg"
-
-	// Download thumbnail file
-	resp, err := httpClient.Get(ThumbnailURL)
+	filename, err := downloadMedia(ctx, conf, ThumbnailURL, EventID+"-*.jpg", telegramMaxPhotoSize)
 	if err != nil {
-		ErrorSend("Error thumbnail download: "+err.Error(), bot, EventID)
-		return ""
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Error.Println("Error closing response body: " + err.Error())
+		if ctx.Err() == nil {
+			ErrorSend("Error thumbnail download: "+err.Error(), bot, EventID)
 		}
-	}()
-
-	// Check server response
-	if resp.StatusCode != http.StatusOK {
-		ErrorSend("Return bad status: "+resp.Status, bot, EventID)
 		return ""
 	}
-
-	log.Debug.Printf("Expected thumbnail content length: %d bytes", resp.ContentLength)
-
-	// Create thumbnail file
-	f, err := os.Create(filename)
-	if err != nil {
-		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
-		return ""
-	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			log.Error.Println("Error closing thumbnail file: " + err.Error())
-		}
-	}()
-
-	// Write the body to file
-	bytesWritten, err := io.Copy(f, resp.Body)
-	if err != nil {
-		ErrorSend("Error thumbnail write: "+err.Error(), bot, EventID)
-		return ""
-	}
-	log.Debug.Printf("Written %d bytes to %s", bytesWritten, filename)
-
-	// Check if we wrote anything
-	if bytesWritten == 0 {
-		ErrorSend("No data written to thumbnail file", bot, EventID)
-		return ""
-	}
-
-	// Ensure file is properly synced to disk
-	err = f.Sync()
-	if err != nil {
-		ErrorSend("Error syncing file to disk: "+err.Error(), bot, EventID)
-		return ""
-	}
-
-	// Verify file exists and has content
-	fileInfo, err := os.Stat(filename)
-	if err != nil {
-		ErrorSend("Error verifying thumbnail file: "+err.Error(), bot, EventID)
-		return ""
-	}
-
-	if fileInfo.Size() == 0 {
-		ErrorSend("Thumbnail file is empty after download", bot, EventID)
-		return ""
-	}
-
-	log.Debug.Printf("Successfully downloaded thumbnail to %s (size: %d bytes)", filename, fileInfo.Size())
 	return filename
 }
 
-func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsStruct {
+// eventFileURL returns the Frigate API URL of one of an event's files. The
+// event ID comes from Frigate's API response, so it's escaped, not trusted.
+func eventFileURL(baseURL string, EventID string, file string) string {
+	return baseURL + "/api/events/" + url.PathEscape(EventID) + "/" + file
+}
+
+// GetEvents fetches the latest events from Frigate. It returns no events on
+// error, or when ctx is cancelled.
+func GetEvents(ctx context.Context, FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsStruct {
 	conf := config.New()
 
-	FrigateURL = FrigateURL + "?limit=" + strconv.Itoa(conf.FrigateEventLimit)
+	// Thumbnails are base64 images that make up most of the response, and
+	// they're polled every few seconds. Only events that are sent need one, and
+	// saveEventThumbnail downloads it then.
+	FrigateURL = FrigateURL + "?limit=" + strconv.Itoa(conf.FrigateEventLimit) + "&include_thumbnails=0"
 
 	if SetBefore {
 		timestamp := time.Now().UTC().Unix()
@@ -374,9 +298,16 @@ func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsSt
 	log.Debug.Println("Getting events from Frigate via URL: " + FrigateURL)
 
 	// Request to Frigate
-	resp, err := httpClient.Get(FrigateURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, FrigateURL, nil)
 	if err != nil {
 		ErrorSend("Error get events from Frigate, error: "+err.Error(), bot, "ALL")
+		return EventsStruct{}
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() == nil {
+			ErrorSend("Error get events from Frigate, error: "+err.Error(), bot, "ALL")
+		}
 		return EventsStruct{}
 	}
 	defer func() {
@@ -392,9 +323,15 @@ func GetEvents(FrigateURL string, bot *tgbotapi.BotAPI, SetBefore bool) EventsSt
 	}
 
 	// Read data from response
-	byteValue, err := io.ReadAll(resp.Body)
+	byteValue, err := io.ReadAll(io.LimitReader(resp.Body, maxEventsResponseSize+1))
 	if err != nil {
-		ErrorSend("Can't read JSON: "+err.Error(), bot, "ALL")
+		if ctx.Err() == nil {
+			ErrorSend("Can't read JSON: "+err.Error(), bot, "ALL")
+		}
+		return EventsStruct{}
+	}
+	if len(byteValue) > maxEventsResponseSize {
+		ErrorSend(fmt.Sprintf("Events response from Frigate is larger than %d MB, ignoring it.", maxEventsResponseSize/1024/1024), bot, "ALL")
 		return EventsStruct{}
 	}
 
@@ -423,7 +360,7 @@ func SaveClip(ctx context.Context, EventID string) (string, string) {
 	conf := config.New()
 
 	// Generate clip URL
-	ClipURL := conf.FrigateURL + "/api/events/" + EventID + "/clip.mp4"
+	ClipURL := eventFileURL(conf.FrigateURL, EventID, "clip.mp4")
 
 	deadline := time.Now().Add(time.Duration(conf.ClipRetryTimeout) * time.Second)
 	delay := clipRetryDelay
@@ -458,7 +395,7 @@ func SavePreview(ctx context.Context, EventID string) string {
 	conf := config.New()
 
 	// Generate preview URL
-	PreviewURL := conf.FrigateURL + "/api/events/" + EventID + "/preview.mp4"
+	PreviewURL := eventFileURL(conf.FrigateURL, EventID, "preview.mp4")
 	log.Debug.Println("Downloading preview from URL: " + PreviewURL)
 
 	filename, err := downloadMedia(ctx, conf, PreviewURL, EventID+"-*_preview.mp4", telegramMaxUploadSize)
@@ -585,12 +522,12 @@ func SendMessageEvent(ctx context.Context, FrigateEvent EventStruct, bot *tgbota
 		text += "*URLs*\n"
 		text += "┣[Events](" + conf.FrigateExternalURL + "/events?cameras=" + FrigateEvent.Camera + "&labels=" + FrigateEvent.Label + "&zones=" + strings.Join(GetTagList(FrigateEvent.Zones), ",") + ")\n"
 		text += "┣[General](" + conf.FrigateExternalURL + ")\n"
-		text += "┗[Source clip](" + conf.FrigateExternalURL + "/api/events/" + FrigateEvent.ID + "/clip.mp4)\n"
+		text += "┗[Source clip](" + eventFileURL(conf.FrigateExternalURL, FrigateEvent.ID, "clip.mp4") + ")\n"
 	}
 
 	var FilePathThumbnail string
 	if conf.IncludeThumbnailEvent {
-		FilePathThumbnail = saveEventThumbnail(FrigateEvent, bot)
+		FilePathThumbnail = saveEventThumbnail(ctx, FrigateEvent, bot)
 		if FilePathThumbnail != "" {
 			defer removeFile(FilePathThumbnail)
 		}
@@ -643,42 +580,18 @@ func SendMessageEvent(ctx context.Context, FrigateEvent EventStruct, bot *tgbota
 
 // saveEventThumbnail saves the event thumbnail to /tmp, from the base64 data
 // in the event if possible, otherwise by downloading it. Returns "" on failure.
-func saveEventThumbnail(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) string {
-	var FilePathThumbnail string
+// Both ways only return files that were fully written and aren't empty.
+func saveEventThumbnail(ctx context.Context, FrigateEvent EventStruct, bot *tgbotapi.BotAPI) string {
 	if FrigateEvent.Thumbnail != "" {
-		// Try to use the base64 thumbnail first
 		log.Debug.Println("Using base64 thumbnail from event data")
-		FilePathThumbnail = SaveThumbnail(FrigateEvent.ID, FrigateEvent.Thumbnail, bot)
-
-		// Verify thumbnail file has content
-		fileInfo, err := os.Stat(FilePathThumbnail)
-		if err != nil || fileInfo.Size() == 0 {
-			log.Debug.Println("Base64 thumbnail failed, trying direct download")
-			// If base64 method failed, try direct download
-			if err == nil {
-				removeFile(FilePathThumbnail)
-			}
-			FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
+		if FilePathThumbnail := SaveThumbnail(FrigateEvent.ID, FrigateEvent.Thumbnail, bot); FilePathThumbnail != "" {
+			return FilePathThumbnail
 		}
+		log.Debug.Println("Base64 thumbnail failed, trying direct download")
 	} else {
-		// No thumbnail in event data, download directly
 		log.Debug.Println("No thumbnail in event data, downloading directly")
-		FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
 	}
-
-	// Verify thumbnail file before adding to media group
-	thumbnailInfo, err := os.Stat(FilePathThumbnail)
-	if err != nil {
-		ErrorSend("Error getting thumbnail file info: "+err.Error(), bot, FrigateEvent.ID)
-		return ""
-	}
-	if thumbnailInfo.Size() == 0 {
-		log.Error.Printf("Thumbnail file is empty: %s", FilePathThumbnail)
-		ErrorSend("Cannot send empty thumbnail file", bot, FrigateEvent.ID)
-		removeFile(FilePathThumbnail)
-		return ""
-	}
-	return FilePathThumbnail
+	return DownloadThumbnail(ctx, FrigateEvent.ID, bot)
 }
 
 // sendEventMessage sends the thumbnail and videos as one media group with
@@ -929,14 +842,11 @@ func SendTextEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 func NotifyEvents(bot *tgbotapi.BotAPI, FrigateEventsURL string, ctx context.Context) {
 	conf := config.New()
 	for {
-		select {
-		case <-ctx.Done():
+		FrigateEvents := GetEvents(ctx, FrigateEventsURL, bot, false)
+		ParseEvents(FrigateEvents, bot, true)
+		if !sleepContext(ctx, time.Duration(conf.WatchDogSleepTime)*time.Second) {
 			log.Info.Println("NotifyEvents: shutting down watchdog loop.")
 			return
-		default:
 		}
-		FrigateEvents := GetEvents(FrigateEventsURL, bot, false)
-		ParseEvents(FrigateEvents, bot, true)
-		time.Sleep(time.Duration(conf.WatchDogSleepTime) * time.Second)
 	}
 }
