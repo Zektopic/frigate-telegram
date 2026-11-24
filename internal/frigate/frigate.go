@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -73,6 +74,10 @@ type EventStruct struct {
 	Zones              []any       `json:"zones"`
 }
 
+// activeEvents tracks event IDs currently being processed by goroutines to prevent
+// duplicate concurrent processing of the same event.
+var activeEvents sync.Map
+
 // eventSemaphore limits concurrent event processing to prevent resource exhaustion.
 // Buffer size of 5 means at most 5 events are processed concurrently.
 var eventSemaphore = make(chan struct{}, 5)
@@ -81,6 +86,12 @@ var eventSemaphore = make(chan struct{}, 5)
 // goroutine leaks when the Frigate server is unreachable or hangs.
 var httpClient = &http.Client{
 	Timeout: 60 * time.Second,
+}
+
+// videoHttpClient is used for downloading video clips from Frigate.
+// It has a 180-second timeout to allow Frigate enough time to remux and stream large clips.
+var videoHttpClient = &http.Client{
+	Timeout: 180 * time.Second,
 }
 
 // errorThrottle tracks the last time each error type was sent to Telegram
@@ -204,8 +215,8 @@ func SaveThumbnail(EventID string, Thumbnail string, bot *tgbotapi.BotAPI) strin
 
 	log.Debug.Printf("Decoded thumbnail size: %d bytes", len(dec))
 
-	// Generate uniq filename
-	filename := "/tmp/" + EventID + ".jpg"
+	// Generate unique filename
+	filename := fmt.Sprintf("/tmp/%s_%d.jpg", EventID, time.Now().UnixNano())
 	f, err := os.Create(filename)
 	if err != nil {
 		ErrorSend("Error when create file: "+err.Error(), bot, EventID)
@@ -263,8 +274,8 @@ func DownloadThumbnail(EventID string, bot *tgbotapi.BotAPI) string {
 	ThumbnailURL := conf.FrigateURL + "/api/events/" + EventID + "/thumbnail.jpg"
 	log.Debug.Println("Downloading thumbnail from URL: " + ThumbnailURL)
 
-	// Generate uniq filename
-	filename := "/tmp/" + EventID + ".jpg"
+	// Generate unique filename
+	filename := fmt.Sprintf("/tmp/%s_%d.jpg", EventID, time.Now().UnixNano())
 
 	// Download thumbnail file
 	resp, err := httpClient.Get(ThumbnailURL)
@@ -397,10 +408,10 @@ func SaveClip(EventID string, bot *tgbotapi.BotAPI) string {
 	log.Debug.Println("Downloading clip from URL: " + ClipURL)
 
 	// Generate unique filename
-	filename := "/tmp/" + EventID + ".mp4"
+	filename := fmt.Sprintf("/tmp/%s_%d.mp4", EventID, time.Now().UnixNano())
 
-	// Download clip file
-	resp, err := httpClient.Get(ClipURL)
+	// Download clip file using videoHttpClient with extended timeout
+	resp, err := videoHttpClient.Get(ClipURL)
 	if err != nil {
 		ErrorSend("Error clip download: "+err.Error(), bot, EventID)
 		return ""
@@ -476,7 +487,7 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 	log.Debug.Println("Downloading preview from URL: " + PreviewURL)
 
 	// Generate unique filename
-	filename := "/tmp/" + EventID + "_preview.mp4"
+	filename := fmt.Sprintf("/tmp/%s_%d_preview.mp4", EventID, time.Now().UnixNano())
 
 	// Download preview file
 	resp, err := httpClient.Get(PreviewURL)
@@ -535,11 +546,68 @@ func SavePreview(EventID string, bot *tgbotapi.BotAPI) string {
 	return filename
 }
 
+// CompressClip compresses a video clip using ffmpeg to ensure it fits within Telegram's 50MB file size limit.
+// It scales down to 720p height (preserving aspect ratio), encodes with H.264 CRF 28 at veryfast preset,
+// and moves the MP4 moov atom to the beginning (+faststart) for quick Telegram mobile playback.
+func CompressClip(inputPath string, eventID string) (string, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return "", fmt.Errorf("ffmpeg not found in PATH: %w", err)
+	}
+
+	outputPath := fmt.Sprintf("/tmp/%s_%d_compressed.mp4", eventID, time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ffmpegPath,
+		"-y",
+		"-i", inputPath,
+		"-vf", "scale=-2:min(720\\,ih)",
+		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-crf", "28",
+		"-c:a", "aac",
+		"-b:a", "96k",
+		"-movflags", "+faststart",
+		outputPath,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.Remove(outputPath)
+		return "", fmt.Errorf("ffmpeg compression failed: %w, output: %s", err, string(output))
+	}
+
+	info, err := os.Stat(outputPath)
+	if err != nil || info.Size() == 0 {
+		_ = os.Remove(outputPath)
+		return "", fmt.Errorf("compressed clip is missing or empty")
+	}
+
+	return outputPath, nil
+}
+
 func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 	// Get config
 	conf := config.New()
 
-	redis.AddNewEvent(FrigateEvent.ID, "InWork", time.Duration(60)*time.Second)
+	// Track all temporary files created during this event run so they are guaranteed
+	// to be cleaned up on return, regardless of whether sending succeeded or failed.
+	var filesToCleanup []string
+	defer func() {
+		for _, f := range filesToCleanup {
+			if f != "" {
+				if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+					log.Debug.Println("Error removing temporary file: " + err.Error())
+				}
+			}
+		}
+	}()
+
+	// Set InWork state in Redis with a generous TTL (10 minutes) so slow video
+	// downloads/uploads or sleeping never cause Redis key expiration during processing.
+	inWorkTTL := time.Duration(conf.TimeWaitSave*2+600) * time.Second
+	redis.AddNewEvent(FrigateEvent.ID, "InWork", inWorkTTL)
 
 	// Prepare text message
 	text := ""
@@ -593,10 +661,8 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 			if err != nil || fileInfo.Size() == 0 {
 				log.Debug.Println("Base64 thumbnail failed, trying direct download")
 				// If base64 method failed, try direct download
-				if err == nil {
-					if removeErr := os.Remove(FilePathThumbnail); removeErr != nil {
-						log.Debug.Println("Error removing empty thumbnail file: " + removeErr.Error())
-					}
+				if FilePathThumbnail != "" {
+					_ = os.Remove(FilePathThumbnail)
 				}
 				FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
 			}
@@ -606,22 +672,26 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 			FilePathThumbnail = DownloadThumbnail(FrigateEvent.ID, bot)
 		}
 
-		// Verify thumbnail file before adding to media group
-		thumbnailInfo, err := os.Stat(FilePathThumbnail)
-		if err != nil {
-			ErrorSend("Error getting thumbnail file info: "+err.Error(), bot, FrigateEvent.ID)
-			FilePathThumbnail = ""
-		} else if thumbnailInfo.Size() == 0 {
-			log.Error.Printf("Thumbnail file is empty: %s", FilePathThumbnail)
-			ErrorSend("Cannot send empty thumbnail file", bot, FrigateEvent.ID)
-			FilePathThumbnail = ""
-		}
-
 		if FilePathThumbnail != "" {
-			MediaThumbnail := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(FilePathThumbnail))
-			MediaThumbnail.Caption = text
-			MediaThumbnail.ParseMode = tgbotapi.ModeMarkdown
-			medias = append(medias, MediaThumbnail)
+			filesToCleanup = append(filesToCleanup, FilePathThumbnail)
+
+			// Verify thumbnail file before adding to media group
+			thumbnailInfo, err := os.Stat(FilePathThumbnail)
+			if err != nil {
+				ErrorSend("Error getting thumbnail file info: "+err.Error(), bot, FrigateEvent.ID)
+				FilePathThumbnail = ""
+			} else if thumbnailInfo.Size() == 0 {
+				log.Error.Printf("Thumbnail file is empty: %s", FilePathThumbnail)
+				ErrorSend("Cannot send empty thumbnail file", bot, FrigateEvent.ID)
+				FilePathThumbnail = ""
+			}
+
+			if FilePathThumbnail != "" {
+				MediaThumbnail := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(FilePathThumbnail))
+				MediaThumbnail.Caption = text
+				MediaThumbnail.ParseMode = tgbotapi.ModeMarkdown
+				medias = append(medias, MediaThumbnail)
+			}
 		}
 	}
 
@@ -636,11 +706,10 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 
 		// Save clip
 		FilePathClip = SaveClip(FrigateEvent.ID, bot)
-		hasClip = true
-		if FilePathClip == "" {
-			hasClip = false
-		}
-		if hasClip {
+		if FilePathClip != "" {
+			filesToCleanup = append(filesToCleanup, FilePathClip)
+			hasClip = true
+
 			videoInfo, err := os.Stat(FilePathClip)
 			if err != nil {
 				ErrorSend("Error receiving information about the clip file: "+err.Error(), bot, FrigateEvent.ID)
@@ -649,12 +718,36 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 				log.Error.Printf("Clip file is empty: %s", FilePathClip)
 				hasClip = false
 			}
+
 			if hasClip {
-				if videoInfo.Size() < 52428800 {
-					// Telegram don't send large file see for more: https://github.com/OldTyT/frigate-telegram/issues/5
-					// Add clip to media group
-					log.Debug.Printf("Adding clip to media group: %s (size: %d bytes)", FilePathClip, videoInfo.Size())
-					MediaClip := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(FilePathClip))
+				clipSize := videoInfo.Size()
+				uploadFilePath := FilePathClip
+
+				// Telegram Bot API limit is 50MB (52428800 bytes).
+				// If clip is >= 50MB, compress it using ffmpeg so it can be uploaded.
+				if clipSize >= 52428800 {
+					log.Info.Printf("Event %s clip size (%.2f MB) exceeds Telegram 50MB limit, compressing with ffmpeg...",
+						FrigateEvent.ID, float64(clipSize)/(1024*1024))
+					compressedPath, compErr := CompressClip(FilePathClip, FrigateEvent.ID)
+					if compErr == nil {
+						compInfo, statErr := os.Stat(compressedPath)
+						if statErr == nil && compInfo.Size() > 0 && compInfo.Size() < 52428800 {
+							log.Info.Printf("Event %s clip compressed successfully from %.2f MB to %.2f MB",
+								FrigateEvent.ID, float64(clipSize)/(1024*1024), float64(compInfo.Size())/(1024*1024))
+							uploadFilePath = compressedPath
+							filesToCleanup = append(filesToCleanup, compressedPath)
+							clipSize = compInfo.Size()
+						} else {
+							log.Warn.Printf("Event %s compressed clip still exceeds limit or is empty", FrigateEvent.ID)
+						}
+					} else {
+						log.Warn.Printf("Event %s ffmpeg compression failed: %v", FrigateEvent.ID, compErr)
+					}
+				}
+
+				if clipSize < 52428800 {
+					log.Debug.Printf("Adding clip to media group: %s (size: %d bytes)", uploadFilePath, clipSize)
+					MediaClip := tgbotapi.NewInputMediaVideo(tgbotapi.FilePath(uploadFilePath))
 
 					if !conf.IncludeThumbnailEvent {
 						MediaClip.Caption = text
@@ -663,20 +756,30 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 
 					medias = append(medias, MediaClip)
 				} else {
-					log.Debug.Printf("Clip file size is too large: %d bytes (limit: 52428800)", videoInfo.Size())
+					log.Warn.Printf("Event %s clip size (%.2f MB) exceeds Telegram 50MB limit even after compression, skipping direct attachment",
+						FrigateEvent.ID, float64(clipSize)/(1024*1024))
+					// Add note to message with direct link to full video
+					text += fmt.Sprintf("\n⚠️ *Video too large for Telegram (%.1f MB)*: [Watch in Frigate](%s/api/events/%s/clip.mp4)",
+						float64(videoInfo.Size())/(1024*1024), conf.FrigateExternalURL, FrigateEvent.ID)
+					// Update thumbnail caption if thumbnail is included
+					if len(medias) > 0 {
+						if photo, ok := medias[0].(tgbotapi.InputMediaPhoto); ok {
+							photo.Caption = text
+							medias[0] = photo
+						}
+					}
 				}
 			}
 		}
 	}
 
-	// Handle Preview (Video Snippet)
+	// Handle Preview (Video Snippet) - only if no full clip was attached
 	var FilePathPreview string
-	var hasPreview bool
 
-	if conf.IncludePreviewEvent {
+	if conf.IncludePreviewEvent && !hasClip {
 		FilePathPreview = SavePreview(FrigateEvent.ID, bot)
 		if FilePathPreview != "" {
-			hasPreview = true
+			filesToCleanup = append(filesToCleanup, FilePathPreview)
 			previewInfo, err := os.Stat(FilePathPreview)
 			if err == nil && previewInfo.Size() > 0 && previewInfo.Size() < 52428800 {
 				log.Debug.Printf("Adding preview to media group: %s (size: %d bytes)", FilePathPreview, previewInfo.Size())
@@ -687,7 +790,6 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 				}
 				medias = append(medias, MediaPreview)
 			} else {
-				hasPreview = false
 				if err != nil {
 					log.Debug.Printf("Error stating preview file: %s", err.Error())
 				}
@@ -705,35 +807,27 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 		}
 		msg.DisableNotification = redis.GetStateMuteEvent()
 
-		messages, err := bot.SendMediaGroup(msg)
-		if err != nil {
-			log.Error.Printf("Failed to send media group: %s", err.Error())
-			if strings.Contains(err.Error(), "file must be non-empty") {
-				// Try to get more information about the files we're trying to send
-				for i, media := range medias {
-					switch m := media.(type) {
-					case tgbotapi.InputMediaPhoto:
-						if filePath, ok := m.Media.(tgbotapi.FilePath); ok {
-							fileInfo, statErr := os.Stat(string(filePath))
-							if statErr != nil {
-								log.Error.Printf("Media item %d: Cannot get file info: %s", i, statErr.Error())
-							} else {
-								log.Error.Printf("Media item %d: Photo file exists, size: %d bytes", i, fileInfo.Size())
-							}
-						}
-					case tgbotapi.InputMediaVideo:
-						if filePath, ok := m.Media.(tgbotapi.FilePath); ok {
-							fileInfo, statErr := os.Stat(string(filePath))
-							if statErr != nil {
-								log.Error.Printf("Media item %d: Cannot get file info: %s", i, statErr.Error())
-							} else {
-								log.Error.Printf("Media item %d: Video file exists, size: %d bytes", i, fileInfo.Size())
-							}
-						}
-					}
-				}
+		var messages []tgbotapi.Message
+		var sendErr error
+		const maxRetries = 2
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			messages, sendErr = bot.SendMediaGroup(msg)
+			if sendErr == nil {
+				break
 			}
-			ErrorSend("Error send media group message: "+err.Error(), bot, FrigateEvent.ID)
+			log.Warn.Printf("Event %s: SendMediaGroup attempt %d/%d failed: %v", FrigateEvent.ID, attempt, maxRetries, sendErr)
+			if attempt < maxRetries {
+				time.Sleep(3 * time.Second)
+			}
+		}
+
+		if sendErr != nil {
+			log.Error.Printf("Failed to send media group for event %s: %s", FrigateEvent.ID, sendErr.Error())
+			ErrorSend("Error send media group message: "+sendErr.Error(), bot, FrigateEvent.ID)
+			// Do not mark as Finished in Redis on failure!
+			// Remove InWork key so next polling cycle can retry
+			_ = redis.DelEvent(FrigateEvent.ID)
+			return
 		}
 
 		if messages == nil {
@@ -744,25 +838,8 @@ func SendMessageEvent(FrigateEvent EventStruct, bot *tgbotapi.BotAPI) {
 		msg.Text = text
 		if _, err := bot.Send(msg); err != nil {
 			log.Error.Println("Error sending message: " + err.Error())
-		}
-	}
-
-	// Now we can safely remove the files after the media group is sent
-	if hasClip {
-		if err := os.Remove(FilePathClip); err != nil {
-			log.Debug.Println("Error removing clip file: " + err.Error())
-		}
-	}
-
-	if hasPreview {
-		if err := os.Remove(FilePathPreview); err != nil {
-			log.Debug.Println("Error removing preview file: " + err.Error())
-		}
-	}
-
-	if conf.IncludeThumbnailEvent {
-		if err := os.Remove(FilePathThumbnail); err != nil {
-			log.Debug.Println("Error removing thumbnail file: " + err.Error())
+			_ = redis.DelEvent(FrigateEvent.ID)
+			return
 		}
 	}
 
@@ -857,10 +934,19 @@ func ParseEvents(FrigateEvents EventsStruct, bot *tgbotapi.BotAPI, WatchDog bool
 			if WatchDog {
 				SendTextEvent(FrigateEvents[Event], bot)
 			} else {
+				// Prevent concurrent processing of the same event
+				if _, loaded := activeEvents.LoadOrStore(FrigateEvents[Event].ID, struct{}{}); loaded {
+					log.Debug.Printf("Event %s is already in active processing, skipping duplicate", FrigateEvents[Event].ID)
+					continue
+				}
+
 				// Use semaphore to bound concurrent event processing
 				eventSemaphore <- struct{}{}
 				go func(event EventStruct) {
-					defer func() { <-eventSemaphore }()
+					defer func() {
+						activeEvents.Delete(event.ID)
+						<-eventSemaphore
+					}()
 					SendMessageEvent(event, bot)
 				}(FrigateEvents[Event])
 			}

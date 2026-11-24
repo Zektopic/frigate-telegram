@@ -9,10 +9,11 @@ RUN apk --no-cache add binutils && \
 
 FROM arm32v6/alpine
 
-RUN apk --no-cache add tzdata
+RUN apk --no-cache add ca-certificates tzdata ffmpeg
 
 COPY --from=builder /go/frigate-telegram/frigate-telegram /frigate-telegram
 
-USER nobody
+RUN addgroup -g 65532 -S nonroot && adduser -u 65532 -S nonroot -G nonroot
+USER 65532:65532
 
 ENTRYPOINT ["/frigate-telegram"]

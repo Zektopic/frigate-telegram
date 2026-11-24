@@ -153,6 +153,17 @@ func AddNewEvent(EventID string, State string, RedisTTL time.Duration) {
 	recordRedisSuccess()
 }
 
+func DelEvent(EventID string) error {
+	err := rdb.Del(ctx, EventID).Err()
+	if err != nil {
+		log.Error.Println("DelEvent: Redis Del error: " + err.Error())
+		recordRedisFailure()
+		return err
+	}
+	recordRedisSuccess()
+	return nil
+}
+
 func CheckEvent(EventID string) bool {
 	event, err := rdb.Exists(ctx, EventID).Result()
 	if err != nil {
