@@ -1,7 +1,13 @@
 ---
 services:
   redis:
-    image: redis:7.4-alpine
+    # redis:7.4-alpine is built on Alpine 3.22 and lags its security updates
+    # (zlib 1.4, CVE-2026-4738). Refresh: docker compose build --pull redis
+    build:
+      dockerfile_inline: |
+        FROM redis:7.4-alpine
+        RUN apk upgrade --no-cache
+    image: frigate-telegram-redis:local
     network_mode: host
     restart: always
     healthcheck:
@@ -12,6 +18,11 @@ services:
       start_period: 5s
     command:
       - 'redis-server'
+      # Host networking would otherwise expose Redis on every interface;
+      # frigate-telegram connects over localhost.
+      - '--bind'
+      - '127.0.0.1'
+      - '-::1'
       - '--port'
       - '6380'
       - '--requirepass'

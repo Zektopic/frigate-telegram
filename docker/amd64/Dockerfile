@@ -1,4 +1,4 @@
-FROM golang:1.27.4-alpine3.23 AS builder
+FROM golang:1.27.4-alpine3.24 AS builder
 
 WORKDIR /go/frigate-telegram
 
@@ -14,13 +14,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build . && \
     strip frigate-telegram
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 RUN apk update && apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates tzdata ffmpeg && \
-    apk add --no-cache --virtual .strip binutils && \
-    objcopy --remove-section .dep-v0 /usr/lib/librav1e.so.0.8.1 && \
-    apk del .strip
+    apk add --no-cache ca-certificates tzdata ffmpeg
 
 COPY --from=builder /go/frigate-telegram/frigate-telegram /frigate-telegram
 
