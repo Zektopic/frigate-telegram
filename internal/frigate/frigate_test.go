@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -295,5 +296,69 @@ func TestSaveThumbnailUsesUniqueTempFile(t *testing.T) {
 	if path := SaveThumbnail("../../escape", data, bot); path != "" {
 		removeFile(path)
 		t.Errorf("event ID with a path separator was written to %q", path)
+	}
+}
+
+func TestFitClipToUploadLimitKeepsSmallClip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "small.mp4")
+	if err := os.WriteFile(path, []byte("not really a video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, reason := fitClipToUploadLimit(context.Background(), path, "1700000000.000003-small")
+	if got != path || reason != "" {
+		t.Fatalf("small clip should be returned unchanged, got %q, %q", got, reason)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("small clip must not be removed: %v", err)
+	}
+}
+
+func TestFitClipToUploadLimitWithoutFFmpeg(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.mp4")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A sparse file is enough: only the size is checked before compressing.
+	if err := f.Truncate(telegramMaxUploadSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	got, reason := fitClipToUploadLimit(context.Background(), path, "1700000000.000004-large")
+	if got != "" || !strings.Contains(reason, "compression failed") {
+		t.Fatalf("want no clip and a compression reason, got %q, %q", got, reason)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("oversized original should be removed, stat err: %v", err)
+	}
+}
+
+func TestCompressClipProducesSmallerVideo(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	input := filepath.Join(t.TempDir(), "input.mp4")
+	gen := exec.Command(ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=1920x1080:rate=10",
+		"-f", "lavfi", "-i", "sine=duration=2", "-c:v", "libx264", "-crf", "10", "-c:a", "aac", "-shortest", input)
+	if out, err := gen.CombinedOutput(); err != nil {
+		t.Fatalf("generate test clip: %v: %s", err, out)
+	}
+
+	output, err := compressClip(context.Background(), input, "1700000000.000005-compress")
+	if err != nil {
+		t.Fatalf("compressClip: %v", err)
+	}
+	defer removeFile(output)
+
+	in, _ := os.Stat(input)
+	out, err := os.Stat(output)
+	if err != nil || out.Size() == 0 || out.Size() >= in.Size() {
+		t.Fatalf("compressed clip should exist and be smaller: in=%d out=%v err=%v", in.Size(), out, err)
 	}
 }
