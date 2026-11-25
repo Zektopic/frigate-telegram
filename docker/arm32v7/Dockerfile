@@ -1,4 +1,4 @@
-FROM arm32v7/golang:1.26.4-alpine AS builder
+FROM arm32v7/golang:1.27.4-alpine3.24 AS builder
 
 WORKDIR /src
 
