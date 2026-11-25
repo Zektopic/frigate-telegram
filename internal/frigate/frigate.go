@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,6 +78,14 @@ type EventStruct struct {
 // telegramMaxUploadSize is the largest file a bot can upload.
 // See https://github.com/OldTyT/frigate-telegram/issues/5
 const telegramMaxUploadSize = 50 * 1024 * 1024
+
+// clipDownloadMaxSize caps how large a clip may be downloaded. Clips over
+// telegramMaxUploadSize are re-encoded to fit; this bound keeps an unexpectedly
+// long clip from filling /tmp.
+const clipDownloadMaxSize = 512 * 1024 * 1024
+
+// clipCompressTimeout bounds one ffmpeg re-encode of an oversized clip.
+const clipCompressTimeout = 5 * time.Minute
 
 // telegramMaxPhotoSize is the largest photo a bot can send.
 const telegramMaxPhotoSize = 10 * 1024 * 1024
@@ -366,12 +375,12 @@ func SaveClip(ctx context.Context, EventID string) (string, string) {
 	delay := clipRetryDelay
 	for attempt := 1; ; attempt++ {
 		log.Debug.Printf("Downloading clip from URL: %s (attempt %d)", ClipURL, attempt)
-		filename, err := downloadMedia(ctx, conf, ClipURL, EventID+"-*.mp4", telegramMaxUploadSize)
+		filename, err := downloadMedia(ctx, conf, ClipURL, EventID+"-*.mp4", clipDownloadMaxSize)
 		if err == nil {
-			return filename, ""
+			return fitClipToUploadLimit(ctx, filename, EventID)
 		}
 		if errors.Is(err, errMediaTooLarge) {
-			return "", "larger than the 50 MB Telegram limit"
+			return "", "larger than the 512 MB download limit"
 		}
 		if ctx.Err() != nil {
 			return "", "shutting down"
@@ -386,6 +395,75 @@ func SaveClip(ctx context.Context, EventID string) (string, string) {
 		}
 		delay = min(delay*2, 2*time.Minute)
 	}
+}
+
+// fitClipToUploadLimit returns path unchanged when the clip fits the Telegram
+// upload limit. Otherwise it re-encodes the clip with ffmpeg and returns the
+// smaller file, or "" and a reason for the caption when that isn't possible.
+// The original download is removed whenever it isn't the file returned.
+func fitClipToUploadLimit(ctx context.Context, path string, eventID string) (string, string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		removeFile(path)
+		return "", "download could not be read: " + err.Error()
+	}
+	if info.Size() <= telegramMaxUploadSize {
+		return path, ""
+	}
+	defer removeFile(path)
+
+	log.Info.Printf("Event %s clip is %.1f MB, over the Telegram limit; compressing with ffmpeg",
+		eventID, float64(info.Size())/(1024*1024))
+	compressed, err := compressClip(ctx, path, eventID)
+	if err != nil {
+		log.Warn.Printf("Event %s clip compression failed: %s", eventID, err.Error())
+		return "", "larger than the 50 MB Telegram limit (compression failed)"
+	}
+	compressedInfo, err := os.Stat(compressed)
+	if err != nil || compressedInfo.Size() == 0 || compressedInfo.Size() > telegramMaxUploadSize {
+		removeFile(compressed)
+		return "", "larger than the 50 MB Telegram limit even after compression"
+	}
+
+	log.Info.Printf("Event %s clip compressed from %.1f MB to %.1f MB", eventID,
+		float64(info.Size())/(1024*1024), float64(compressedInfo.Size())/(1024*1024))
+	return compressed, ""
+}
+
+// compressClip re-encodes a clip to at most 720p H.264 (CRF 28) with AAC audio
+// into a new file in /tmp and returns its path. It needs ffmpeg in PATH.
+func compressClip(ctx context.Context, inputPath string, eventID string) (string, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return "", fmt.Errorf("ffmpeg not found: %w", err)
+	}
+
+	out, err := os.CreateTemp("/tmp", eventID+"-*_compressed.mp4")
+	if err != nil {
+		return "", err
+	}
+	outputPath := out.Name()
+	if err := out.Close(); err != nil {
+		removeFile(outputPath)
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, clipCompressTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ffmpegPath,
+		"-y", "-loglevel", "error",
+		"-i", inputPath,
+		"-vf", "scale=-2:min(720\\,ih)",
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+		"-c:a", "aac", "-b:a", "96k",
+		"-movflags", "+faststart",
+		outputPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		removeFile(outputPath)
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return outputPath, nil
 }
 
 // SavePreview downloads the event preview to /tmp. Previews are optional, so
